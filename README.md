@@ -1,2 +1,451 @@
 # slint-harness
-Headless UI testing for Slint apps: geometry sweeps, click-everything smoke tests, coverage gates and isolated profiles on Slint’s testing backend.
+
+A headless UI harness for [Slint](https://slint.dev) apps. It drives your real app, with all its
+Rust wiring, on Slint's testing backend inside a throw-away profile, and collects every problem
+into one report instead of stopping at the first: an invariant sweep of the window geometry, a
+click-everything smoke pass, an optional coverage gate over your `.slint` sources, and your own
+scenario expectations. Reports are written as JSON plus, by default, Markdown; HTML and plain
+text are a builder call or an environment variable away (see Report formats). Exit code 0 means
+no findings, 1 findings, 2 an aborted run.
+
+**Read this first.** `Harness::new()` must be the first statement of your test's `main`. The run
+redirects the environment (`std::env::set_var`) into a temporary profile, which is sound only
+while the process is single-threaded, so nothing may start a thread before it. On Linux the
+harness warns when it finds more than one thread. At the end of the run the environment is
+restored the same way, so stop the app's threads in `Harness::teardown`; on Unix a thread still
+reading the environment at that point is a data race. Several runs in one process are fine under
+that rule.
+
+Contents: Quick start, Examples, Hooks, Isolation, Aborts, Checks, Report formats, Console
+output, Coverage gate, Environment variables, Builder reference, Troubleshooting, Limits,
+Versions and the Slint pin, License.
+
+## Quick start
+
+Five steps; each says what goes wrong when it is skipped. `examples/counter` is this recipe in
+the smallest app; `examples/notes` is the full one (see Examples).
+
+1. **Cargo.toml.** The harness is a dev-dependency. The small `slint-harness-hooks` crate
+   (std only, no Slint) is an optional normal dependency behind a `ui-harness` feature,
+   because code under `src/` can never name a dev-dependency. The test target needs
+   `harness = false` (the harness owns `main`: panic recorder, exit code, argument filter)
+   and `required-features`, so it is compiled only with the feature on.
+
+   ```toml
+   [features]
+   ui-harness = ["dep:slint-harness-hooks"]
+
+   [dependencies]
+   slint = "=1.18.1"
+   slint-harness-hooks = { version = "0.1", optional = true }
+
+   [build-dependencies]
+   slint-build = "=1.18.1"
+
+   [dev-dependencies]
+   slint-harness = "=0.18.0"
+
+   [[test]]
+   name = "ui"
+   harness = false
+   required-features = ["ui-harness"]
+   ```
+
+   Skipped `harness = false`: `cargo test --test ui` prints `running 0 tests` and your `main`
+   never runs. Skipped `required-features`: with the feature off the UI has no debug info and
+   the run aborts with exit code 2 (the abort names the fix).
+
+2. **build.rs.** Switch Slint debug info on when the feature is on; the harness's element
+   queries need it. Leave the default alone otherwise: it honours `SLINT_EMIT_DEBUG_INFO`, so
+   a `with_debug_info(false)` would switch that path off.
+
+   ```rust
+   fn main() {
+       let mut config = slint_build::CompilerConfiguration::new();
+       if std::env::var_os("CARGO_FEATURE_UI_HARNESS").is_some() {
+           config = config.with_debug_info(true);
+       }
+       slint_build::compile_with_config("ui/app.slint", config).expect("the UI compiles");
+   }
+   ```
+
+   Skipped: the first launch aborts with `the window exposes no elements` and the three ways
+   to fix it. With the `slint!` macro instead of build.rs, set `SLINT_EMIT_DEBUG_INFO=1`, for
+   example through `[env]` in `.cargo/config.toml`.
+
+3. **tests/ui.rs.** `Harness::new()` is the first statement of `main`; one `.scenario(..)` per
+   journey; `.run()` returns the exit code.
+
+   ```rust
+   use my_app::MainWindow;
+   use slint_harness::prelude::*;
+
+   fn main() -> ExitCode {
+       Harness::new()
+           .sizes([(1024, 700), (640, 480)])
+           .scenario("startup", |ctx| {
+               let app = ctx.launch(MainWindow::new)?;
+               ctx.sweep_at_sizes(&app, "startup");
+               ctx.view(&app).click("Open")?;
+               ctx.shutdown(app);
+               Ok(())
+           })
+           .scenario("click everything", |ctx| {
+               ctx.smoke(Smoke::new("startup"), |ctx| Ok(vec![ctx.launch(MainWindow::new)?]));
+               Ok(())
+           })
+           .run()
+   }
+   ```
+
+   Scenarios return `Result<(), Finding>`: an `Err` (from `?` on a failed query, a failed
+   launch ...) is recorded as a finding and the run goes on with the next scenario; a panic in
+   a scenario becomes a `scenario-panic` finding. A harness with no scenario is a `config`
+   finding, so an empty skeleton cannot pass by accident.
+
+4. **Run it.** `cargo test --features ui-harness --test ui`. Cargo skips a target whose
+   `required-features` are off without a word, so a plain `cargo test` runs no UI test; in CI
+   use `cargo test --all-features`, and locally an alias in `.cargo/config.toml` helps:
+
+   ```toml
+   [alias]
+   ui = "test --features ui-harness --test ui"
+   ```
+
+   The first console line names the harness and Slint versions, the selected scenarios and the
+   report directory (`<target>/slint-harness/<package>`); a failing run ends with its
+   findings.
+
+5. **Hooks**, as soon as the app has a file dialog, a clipboard, an opener or an OS-resolved
+   data directory: see Hooks below. Without them a click that opens a native dialog opens a
+   real one and blocks the run.
+
+## Examples
+
+- `examples/counter`: the recipe above in the smallest app (one window, two buttons): a sweep
+  at two sizes, a click journey with an expectation, a click-everything pass.
+  `cargo test -p counter --features ui-harness --test ui`.
+- `examples/notes`: a small notes app that uses every seam: file dialogs answered from a queue,
+  clipboard and opener captured, the settings file in the harness's data directory and
+  guarded, an error notice read and cleared by the harness, a scenario deny word and an
+  expected notice in the smoke pass, `record_callback`, the coverage gate with a TOML allow
+  file, and all three report formats. `cargo test -p notes --features ui-harness --test ui`,
+  then open `target/slint-harness/notes/report.html`.
+
+## Hooks: file dialogs, clipboard, opener, data directory
+
+Call these only under your feature. Without them everything still works, except that a click
+which opens a native file dialog opens a real one and blocks the run.
+
+```rust
+// A file picker: the feature-on arm answers from the queue, the feature-off arm is the real
+// dialog. Keep the two arms in one function (or give the feature-off arm a `const fn` twin
+// when the function must stay `const`), so every call site is identical in both builds.
+fn pick_file(title: &str) -> Option<std::path::PathBuf> {
+    #[cfg(feature = "ui-harness")]
+    {
+        slint_harness_hooks::picker::next(title)
+    }
+    #[cfg(not(feature = "ui-harness"))]
+    {
+        rfd::FileDialog::new().set_title(title).pick_file()
+    }
+}
+
+// Clipboard and opener: return early when the harness captured the call.
+fn copy_text(text: &str) {
+    #[cfg(feature = "ui-harness")]
+    if slint_harness_hooks::clipboard::capture(text) {
+        return;
+    }
+    // ... the real clipboard write
+}
+
+fn open_url(url: &str) {
+    #[cfg(feature = "ui-harness")]
+    if slint_harness_hooks::opener::capture(url) {
+        return;
+    }
+    // ... start the OS opener
+}
+
+// Apps that resolve their config directory through the OS (the `dirs` crate on Windows uses
+// Known Folders and ignores APPDATA) ask the harness first:
+fn data_dir() -> std::path::PathBuf {
+    #[cfg(feature = "ui-harness")]
+    if let Some(dir) = slint_harness_hooks::paths::data_dir() {
+        return dir;
+    }
+    // ... the normal lookup
+    std::path::PathBuf::new()
+}
+```
+
+In a scenario: `ctx.hooks().queue_pick(path)` / `queue_cancel()` answer the next dialog;
+`take_clipboard_writes()`, `take_opened()` and `take_picker_failures()` read back what the app
+did. A dialog opened with nothing queued answers "cancelled" and is an `unexpected-file-dialog`
+finding.
+
+The same pattern, compiled and driven, is `examples/notes/src/lib.rs`; the feature-off arms
+there are stubs because the example ships no dialog crate.
+
+## Isolation
+
+`Profile::isolated()` creates `<temp>/slint-harness-<pid>-<nanos>`, points `APPDATA`,
+`LOCALAPPDATA`, `XDG_CONFIG_HOME`, `XDG_CACHE_HOME`, `XDG_DATA_HOME`, `XDG_STATE_HOME`,
+`XDG_RUNTIME_DIR`, `HOME`, `USERPROFILE`, `TEMP`, `TMP` and `TMPDIR` into it, sets
+`slint_harness_hooks::paths::set_data_dir` and moves the working directory into it. Windows Known
+Folders are not reachable through the environment: an app that uses them asks
+`slint_harness_hooks::paths::data_dir` (above). Environment redirection alone does not prove your
+app obeys it, so hand over the paths the app really resolves:
+
+```rust
+.profile(Profile::isolated().guard_paths(|| vec![my_app::settings_path(), my_app::database_path()]))
+```
+
+Any path outside the profile aborts the run with exit code 2 before a window exists. The profile
+is deleted at the end, and the environment and working directory are restored.
+
+## Aborts
+
+Exit code 2 ends the run early: a guarded path outside the profile, a Slint platform the app
+installed itself (the app must not select a backend when driven by the harness), or a UI without
+debug info. In every case the profile is deleted and the environment restored first, and the
+message says what to change. A scenario can request the same through
+`slint_harness::profile::request_abort`. No report file is written for an aborted run: the cause
+is on stderr, the findings made so far on stdout only.
+
+## Checks
+
+| Check | Meaning |
+|---|---|
+| `outside-window` | an element sticks out of the window (scrolled-out content is accounted for) |
+| `zero-size` | an interactive control has no size |
+| `overlap` | two controls overlap (header and modal backdrops are accounted for) |
+| `missing-label` | an interactive control has no accessible label or placeholder |
+| `invisible-but-enabled` | an enabled control is (nearly) transparent |
+| `panic` | a panic on any thread, caught by the recorder |
+| `error-toast` | the app's error or warning notice (`ctx.on_error_notice`) was showing |
+| `main-closed` | the main window closed during the smoke pass |
+| `window-invalid` | a window could not be queried |
+| `launch` | the app did not start |
+| `timeout` | `ctx.wait_for` did not see its condition |
+| `scenario-panic` | a scenario panicked; it ended there |
+| `unexpected-file-dialog` | a native dialog opened with no queued answer |
+| `bad-chord` | `ctx.press` got a key chord it cannot parse |
+| `not-found` | a `WindowView::find*` query matched nothing (similar labels are listed) |
+| `ambiguous-label` | `WindowView::find` matched several elements |
+| `coverage` | an uncovered UI action, or a stale allow-list entry |
+| `config` | a bad environment variable, an unmatched SLINT_HARNESS_FILTER, a harness without scenarios, or a report file that could not be written or removed |
+
+Identical findings are merged with a repeat count. The report lists every scenario with its
+finding count and wall time.
+
+## Report formats
+
+Every run writes `report.json` (the harness and Slint versions, findings with repeat counts,
+scenarios with timings, notes, sections, per-check totals). Beside it, one file per selected
+`Format`:
+
+| Format | File | For |
+|---|---|---|
+| `Format::Markdown` (default) | `report.md` | reading and diffing; findings grouped by window, then by check |
+| `Format::Html` | `report.html` | one self-contained page: inline style, no script, no external asset; a `main` landmark and real headings for screen readers, windows collapsible, a light or dark color scheme following the system setting |
+| `Format::Text` (`raw`) | `report.txt` | terminals and CI logs; the Markdown without markup (section bodies, which the coverage gate writes as Markdown, are copied as they are) |
+
+`Harness::formats([Format::Markdown, Format::Html])` selects them in code;
+`SLINT_HARNESS_FORMATS=md,html,txt` replaces that list (`json` is accepted and ignored because
+it is always written; an empty value means JSON only). A run removes the `report.md`,
+`report.html` and `report.txt` it did not select, so the directory always shows what the last
+run wrote. The finding texts are the same in every format.
+
+## Console output
+
+Every line starts with `slint-harness`. In order: the banner (`slint-harness 0.18.0 (Slint
+1.18.1): 7 of 7 scenario(s) selected, report dir ...`), the profile directory and the guarded
+paths, one `scenario <name>` line per scenario with its `-> N finding(s), M ms`, the smoke
+counters, the coverage counters, the report files written, then `PASS, no findings` or `FAIL,
+N finding(s):` with the per-check counts and up to 25 findings as `[window] check: element --
+detail (xN) [state]` (the rest: `... N more in <dir>`). Aborts go to stderr as
+`slint-harness: ABORT: <cause and what to change>`. No color, no cursor movement: the output
+reads the same in a CI log and in a screen reader.
+
+## Coverage gate
+
+Opt-in: `Harness::coverage(Coverage::scan("ui").allow_file("tests/coverage_allow.toml"))`
+scans every `.slint` under `ui/` (relative to the test crate's `CARGO_MANIFEST_DIR`) for
+global callbacks and interactive element sites, and at the end of the run turns every one the
+scenarios never reached into a `coverage` finding. A click through `WindowView::click` or the
+smoke pass counts as activated; a `find*` counts as touched; a scenario that invokes a global
+callback directly says so with `slint_harness::coverage::record_callback("Model.name")`.
+
+Keys: `Model.name` for a callback; `file.slint|Component|id`, `file.slint|Component|"label"`
+or `file.slint|Component|<Type@line>` for an element (the report's Coverage section prints
+them). An element with neither an `id :=` nor a literal label is untrackable: listed, not a
+finding. Allow entries come from code (`.allow(&[("Model.name", "why")])`) or the TOML file:
+
+```toml
+[[allow]]
+key = "Model.unused"
+reason = "driven by the OS tray"
+
+[[allow]]
+key = "dialog.slint|Confirm|*"   # trailing * = prefix
+reason = "covered elsewhere"
+```
+
+`examples/notes/tests/coverage_allow.toml` is a real one.
+
+An entry that matches nothing is a `coverage` finding too (stale). `GateRule` says when the
+gate runs: `NoFilter` (default: skipped under a scenario filter), `Always`, or `Armed` (only
+when a scenario called `slint_harness::coverage::arm_gate()`), set with `.gate_when(..)`.
+
+## Environment variables
+
+| Variable | Effect |
+|---|---|
+| `SLINT_HARNESS_FILTER` | comma-separated scenario name substrings to run (positional arguments that do not start with `-` filter too); positional arguments that match no scenario run nothing and write no report (that is cargo handing another target's filter to this one), an unmatched `SLINT_HARNESS_FILTER` is a `config` finding |
+| `SLINT_HARNESS_SIZES` | `1366x768,720x480`; replaces `Harness::sizes` |
+| `SLINT_HARNESS_FORMATS` | `md,html,txt`: the report files besides `report.json`, which is always written; replaces `Harness::formats`; `json` is accepted and ignored, empty means JSON only, an unknown name is a `config` finding |
+| `SLINT_HARNESS_SEED` | `u64` for scenarios that randomise (`ctx.seed()`), default 0 |
+| `SLINT_HARNESS_ALLOW_FAIL` | any value: exit code 0 even with findings |
+| `SLINT_EMIT_DEBUG_INFO` | `1` at compile time: Slint debug info |
+
+Exit codes: 0 clean, 1 findings, 2 aborted (isolation could not be proven, no debug info).
+
+## Builder reference
+
+- `report_dir`: default `<target>/slint-harness/<package>` (`<target>` from
+  `CARGO_TARGET_TMPDIR` under `cargo test`; one folder per package, so two harness tests in
+  one workspace keep their own files).
+- `sizes`: the window sizes `ctx.sweep_at_sizes` uses.
+- `formats`: which report files are written besides `report.json` (default
+  `[Format::Markdown]`); see Report formats.
+- `profile`: `Profile::isolated().name_prefix(..).guard_paths(..)`.
+- `coverage`: the opt-in coverage gate (above).
+- `sweep_options(SweepOptions { .. })`: the thresholds; the defaults are the Indicatrix ones.
+- `scenario`: one named journey.
+- `teardown`: runs after the last scenario and the gate, before the profile is deleted: stop
+  threads, flush files.
+- `run` / `run_to_report`: the latter returns the `Report` for a test that asserts counts.
+
+`ctx.on_error_notice` and `ctx.clear_notice_with` are per scenario. `WindowView::find(label)`
+matches the accessible label or, when no label matches, the accessible placeholder text (a
+`LineEdit` carries only a placeholder); `find_id("Component::id")` does not depend on text;
+`find_role`, `find_nth`, `labels()` and `placeholders()` complete the set, and a miss is a
+`not-found` finding that lists similar labels and placeholders. `slint_harness::target_dir!()`
+works in any target; integration tests get the compile-time path, others the run-time one.
+
+The prelude (`use slint_harness::prelude::*`) brings `Harness`, `Ctx`, `Attached`, `Hooks`,
+`WindowView`, `Control`, `ElementHandle`, `ElementRoot`, `AccessibleRole`, `Finding`, `Format`,
+`Report`, `Profile`, `ProfileDir`, `Smoke`, `SmokeStats`, `DenyRule`, `DenyField`, `DenyMatch`,
+`DEFAULT_DENY`, `SweepOptions`, `Coverage`, `GateRule`, `record_callback`, `arm_gate`,
+`SLINT_VERSION`, `pump`, `settle`, `wait_until` and `std::process::ExitCode`. API details are
+on docs.rs; recipes (secondary windows, threads, sticky notices, deny lists from data, key
+chords, `report.json` in CI, a custom `SmokeHost`) are in `docs/cookbook.md`.
+
+## Troubleshooting
+
+Symptom, cause, fix. Aborts (exit code 2) print the same advice on stderr.
+
+- **`cargo test --test ui` prints `running 0 tests`.** The `[[test]]` lacks `harness = false`,
+  so libtest owns `main` and yours is dead code. Add it (Quick start, step 1).
+- **`cargo test` runs the unit tests but no UI test, and says nothing.** The target has
+  `required-features = ["ui-harness"]` and the feature is off; cargo skips it silently. Run
+  with `--features ui-harness` (or `--all-features` in CI), or use the `cargo ui` alias.
+- **`ABORT: the window exposes no elements`.** The UI was compiled without Slint debug info.
+  Either `with_debug_info(true)` in build.rs under the feature and run with the feature on, or
+  `SLINT_EMIT_DEBUG_INFO=1` while compiling, or `[env] SLINT_EMIT_DEBUG_INFO = "1"` in
+  `.cargo/config.toml`. If nothing changes, `cargo clean -p <your crate>`: the `slint!` macro
+  is not always re-run when only the environment changed.
+- **`ABORT: the Slint platform was already set`.** The code the harness runs selects a backend
+  (`BackendSelector::select`, `slint::platform::set_platform`). Keep the backend choice in the
+  binary's `main`; the window constructor the scenarios launch must not choose one.
+- **`ABORT: the guarded path ... is outside the profile`.** The app resolves that path through
+  something the profile cannot redirect (Windows Known Folders via the `dirs` crate, a
+  hard-coded path). Under the feature ask `slint_harness_hooks::paths::data_dir()` first
+  (Hooks); a read-only path that may live outside does not belong in `guard_paths`.
+- **`no scenario matches the argument filter ...; nothing run, report not written`.** You ran
+  `cargo test <name>` and cargo handed `<name>` to the harness binary as a scenario filter.
+  Run `cargo test --test ui` (no filter), or filter on purpose with `SLINT_HARNESS_FILTER`.
+- **`config: SLINT_HARNESS_FILTER=... matches no scenario`.** A typo in the filter; the
+  finding lists the scenario names.
+- **`config: no scenarios`.** The harness has no `.scenario(..)`.
+- **`not-found: no element with label "Save"; similar labels: [...]`.** The label changed, the
+  dialog is not open, or the element is in an invisible subtree (invisible elements are never
+  visited). A text field is found by its placeholder when it has no label; `view.labels()` and
+  `view.placeholders()` list what is there; `find_id("Component::id")` does not depend on
+  text.
+- **`error-toast` on every control after the first one in the smoke pass.** The app's notice
+  does not auto-hide and nothing clears it: register `ctx.clear_notice_with(..)` next to
+  `ctx.on_error_notice(..)` (both per scenario), and list the notices a state is expected to
+  raise in `Smoke::allowed_notices`.
+- **The run hangs at a click.** That control opened a native dialog and the app does not go
+  through the hooks: add `slint_harness_hooks::picker::next` at the dialog site (Hooks). Until
+  then, deny the control: `Smoke::new(..).deny(["import"])`.
+- **The run ends at the first panic with no report.** `panic = "abort"` in the test profile
+  disables catching. Use the default `unwind` for the profile that runs the UI test.
+- **`could not delete profile ...`.** A file is still open or an app thread still runs at the
+  end: stop threads and close files in `Harness::teardown`. On Linux the harness also warns
+  when threads remain.
+- **Linux: `warning: the process has N threads`.** Something started a thread before
+  `Harness::run` redirected the environment (a logger, a runtime, a static initialiser).
+  `Harness::new()` must be the first statement of `main` and nothing may spawn before `run()`.
+- **Geometry findings differ between your machine and CI.** The testing backend measures text
+  with the system fonts. Give fixtures `default-font-family: "FixedTestFont"` (fixed metrics
+  everywhere); for a real app compare counts on one machine and give a CI box its own baseline
+  or a pinned font package.
+- **`cargo` fails with `failed to select a version for slint` after adding the harness.** The
+  exact Slint pin (Versions and the Slint pin): pin `slint = "=1.18.1"` in your app, or use the
+  harness release for your Slint line.
+- **The report landed somewhere unexpected.** Run through `cargo test` (it sets
+  `CARGO_TARGET_TMPDIR` and `CARGO_PKG_NAME`, from which `<target>/slint-harness/<package>`
+  is derived) or set `Harness::report_dir` explicitly; the first console line always prints
+  the directory.
+
+## Limits
+
+- **Fonts and CI baselines.** The testing backend measures text with the system fonts, so
+  geometry findings depend on the machine. Only the font family `FixedTestFont` has fixed
+  metrics; give your fixtures `default-font-family: "FixedTestFont"` for exact geometry. For an
+  app under test, compare counts on the same machine, and give a CI box its own baseline (or
+  install a pinned font package).
+- **Scale factor is always 1.** Logical and physical pixels are the same; DPI problems are not
+  visible.
+- **One process.** The harness relaunches windows, not the process. `thread_local!` state in
+  your app survives a relaunch; guard it with a `Weak` owner check, or a service stays bound to
+  the first window.
+- **`panic = "abort"`** in your test profile disables catching: the run ends at the first panic.
+  The recorder chains to the previous panic hook, so backtraces still print.
+- **The text scanner** behind the coverage gate has known limits: component names must start
+  with a capital, `import { X as Y }` renames are not followed, `@children` slots and `states`
+  blocks are opaque, and labels built from expressions are untrackable (allow-list them).
+  The gate is opt-in.
+- **Native pickers without hooks block the run** (the dialog is modal). Add the hooks from day
+  one for any app with file dialogs.
+- **Visibility.** Invisible subtrees are never visited; `visible` and `clip` are not readable
+  through the element API, and there is no way to read a window's `min-width`, so sizes are
+  configuration.
+
+## Versions and the Slint pin
+
+`slint-harness 0.18.x` serves Slint 1.18.x exactly: the harness pins `slint` and
+`i-slint-backend-testing` with `=1.18.1`, because the testing backend is an internal Slint
+crate without semver that pins `i-slint-core` exactly. `slint_harness::SLINT_VERSION` holds the
+version, the first console line prints it, and `report.json` carries it (`harness`, `slint`).
+
+What that means for your app: its `slint` must resolve to the same 1.18.1. Cargo allows one
+version of a 1.x crate per build, so a requirement that cannot be 1.18.1 does not build two
+copies, it fails to resolve (`failed to select a version for slint`, or for `slint-harness`).
+Two ways out: pin `slint = "=1.18.1"` in your app, or move to the harness release that serves
+your Slint line (one harness minor per Slint patch line). `cargo tree -i i-slint-core -e
+normal,dev` shows who pulls which version. A `git` or `path` Slint can still put two
+`i-slint-core`s into one build; the testing platform then lives in the wrong one and the first
+launch fails or aborts; `cargo tree -d` shows the duplicate.
+
+`slint-harness-hooks` has its own `0.1.x` line and no Slint dependency. Minimum Rust: 1.92
+(Slint's).
+
+## License
+
+MIT.

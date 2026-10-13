@@ -1,0 +1,13 @@
+# The coverage gate's allow list for examples/notes (tests/ui.rs): items the gate must not
+# report, each with a reason. A key is `Model.name` for a global callback, or
+# `file.slint|Component|id`, `file.slint|Component|"label"` or `file.slint|Component|<Type@line>`
+# for an element; a trailing `*` makes it a prefix. An entry that matches nothing is reported
+# as stale, so the list cannot rot. The report's Coverage section prints every key it knows.
+
+[[allow]]
+key = "Model.quit"
+reason = "ends the app; no scenario drives it"
+
+[[allow]]
+key = 'notes.slint|NotesWindow|"Quit"'
+reason = "on the default deny list (quit); no scenario drives it"

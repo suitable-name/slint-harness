@@ -1,0 +1,31 @@
+import { Button } from "std-widgets.slint";
+
+export component Counter inherits Window {
+    in-out property <int> count: 0;
+
+    title: "Counter";
+    // Fixed metrics on every OS, so the geometry checks give the same answer everywhere.
+    default-font-family: "FixedTestFont";
+    preferred-width: 320px;
+    preferred-height: 200px;
+
+    VerticalLayout {
+        padding: 16px;
+        spacing: 12px;
+
+        Text {
+            text: "Count: \{root.count}";
+            horizontal-alignment: center;
+        }
+
+        Button {
+            text: "Increment";
+            clicked => { root.count += 1; }
+        }
+
+        Button {
+            text: "Reset";
+            clicked => { root.count = 0; }
+        }
+    }
+}

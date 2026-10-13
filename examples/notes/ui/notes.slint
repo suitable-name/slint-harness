@@ -1,0 +1,82 @@
+// The notes window. Every callback of `Model` is handled in Rust (src/lib.rs); the coverage
+// gate lists each one and each interactive element below, and expects the test to drive or
+// allow-list them. Fixed font metrics (FixedTestFont) so the geometry checks agree on every OS.
+import { Button, CheckBox, LineEdit } from "std-widgets.slint";
+
+export global Model {
+    callback open-note();
+    callback save-note();
+    callback copy-title();
+    callback open-help();
+    callback clear-note();
+    callback delete-note();
+    callback quit();
+    callback autosave-changed(bool);
+}
+
+export component NotesWindow inherits Window {
+    in-out property <string> note-title;
+    // The file the note was last saved to (empty: none); Delete Note removes it.
+    in-out property <string> saved-path;
+    in-out property <string> status: "ready";
+    in-out property <bool> autosave;
+    // The notice row: kind is "error", "warning" or "info"; an empty kind shows nothing.
+    in-out property <string> notice-kind;
+    in-out property <string> notice-text;
+
+    title: "Notes";
+    default-font-family: "FixedTestFont";
+    preferred-width: 480px;
+    preferred-height: 360px;
+
+    VerticalLayout {
+        padding: 12px;
+        spacing: 8px;
+        alignment: start;
+
+        title-edit := LineEdit {
+            placeholder-text: "Title";
+            text <=> root.note-title;
+        }
+        HorizontalLayout {
+            spacing: 8px;
+            alignment: start;
+            Button { text: "Open..."; clicked => { Model.open-note(); } }
+            Button { text: "Save As..."; clicked => { Model.save-note(); } }
+        }
+        HorizontalLayout {
+            spacing: 8px;
+            alignment: start;
+            Button { text: "Copy Title"; clicked => { Model.copy-title(); } }
+            Button { text: "Help"; clicked => { Model.open-help(); } }
+        }
+        HorizontalLayout {
+            spacing: 8px;
+            alignment: start;
+            Button { text: "Clear"; clicked => { Model.clear-note(); } }
+            Button { text: "Delete Note"; clicked => { Model.delete-note(); } }
+            Button { text: "Quit"; clicked => { Model.quit(); } }
+        }
+        CheckBox {
+            text: "Autosave";
+            checked <=> root.autosave;
+            toggled => { Model.autosave-changed(self.checked); }
+        }
+        if root.notice-kind != "": HorizontalLayout {
+            spacing: 8px;
+            alignment: start;
+            Text {
+                text: root.notice-kind + ": " + root.notice-text;
+                vertical-alignment: center;
+            }
+            Button {
+                text: "Dismiss";
+                clicked => {
+                    root.notice-kind = "";
+                    root.notice-text = "";
+                }
+            }
+        }
+        Text { text: "Status: " + root.status; }
+    }
+}

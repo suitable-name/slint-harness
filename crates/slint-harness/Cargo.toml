@@ -1,0 +1,73 @@
+[package]
+name = "slint-harness"
+version = "0.18.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+readme = "../../README.md"
+repository.workspace = true
+description = "Headless UI harness for Slint apps: invariant sweep, click-everything smoke, coverage gate, isolated profile"
+keywords = ["slint", "testing", "gui", "harness"]
+categories = ["development-tools::testing", "gui"]
+
+[dependencies]
+slint = { workspace = true, features = ["std", "compat-1-18"] }
+i-slint-backend-testing = { workspace = true }
+slint-harness-hooks = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+
+# Every self-test is its own process: the testing backend can be initialised once per process,
+# and the harness owns `main` (panic hook, exit code). `cargo test` runs each with exit code 0
+# expected.
+[[test]]
+name = "scrolled_out"
+harness = false
+
+[[test]]
+name = "modal"
+harness = false
+
+[[test]]
+name = "overlap"
+harness = false
+
+[[test]]
+name = "labels"
+harness = false
+
+[[test]]
+name = "invisible"
+harness = false
+
+[[test]]
+name = "coverage"
+harness = false
+
+[[test]]
+name = "profile"
+harness = false
+
+[[test]]
+name = "duplicate_label"
+harness = false
+
+[[test]]
+name = "smoke_restore"
+harness = false
+
+[[test]]
+name = "bounds"
+harness = false
+
+[[test]]
+name = "smoke_findings"
+harness = false
+
+[[test]]
+name = "runner"
+harness = false
+
+[lints]
+workspace = true

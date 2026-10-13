@@ -1,0 +1,4 @@
+# The TOML form of the coverage allow list (used by tests/coverage.rs, run 2).
+[[allow]]
+key = "Model.unused"
+reason = "self-test"

@@ -1,0 +1,25 @@
+// The coverage self-test fixture (crates/slint-harness/tests/coverage.rs). The test compiles
+// the SAME text through `slint::slint!`; the two must match. The inventory is exactly the two
+// callbacks below and one element (the "Press" button).
+import { Button } from "std-widgets.slint";
+
+export global Model {
+    callback used();
+    callback unused();
+}
+
+export component Fixture inherits Window {
+    width: 200px;
+    height: 100px;
+    default-font-family: "FixedTestFont";
+    Text {
+        text: "Coverage";
+    }
+    Button {
+        text: "Press";
+        x: 10px;
+        y: 40px;
+        width: 100px;
+        height: 30px;
+    }
+}

@@ -1,0 +1,32 @@
+[package]
+name = "notes"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+description = "A small Slint notes app that uses every slint-harness seam: file dialogs, clipboard, opener, data dir, notices, deny rules, coverage gate, report formats"
+
+[features]
+# Turns on the harness seams in the app (file dialogs answered from a queue, clipboard and
+# opener captured, the settings file in the harness's data directory), the Slint debug info in
+# build.rs, and the `ui` test target.
+ui-harness = ["dep:slint-harness-hooks"]
+
+[dependencies]
+slint = { workspace = true, features = ["std", "compat-1-18"] }
+slint-harness-hooks = { workspace = true, optional = true }
+
+[build-dependencies]
+slint-build = { workspace = true }
+
+[dev-dependencies]
+slint-harness = { workspace = true }
+
+[[test]]
+name = "ui"
+harness = false
+required-features = ["ui-harness"]
+
+[lints]
+workspace = true
