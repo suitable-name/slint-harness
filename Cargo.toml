@@ -29,7 +29,7 @@ serde_json = "1.0.151"
 toml = "1.1.6"
 
 # Workspace members
-slint-harness = { path = "crates/slint-harness", version = "0.18.0" }
+slint-harness = { path = "crates/slint-harness", version = "0.18.3" }
 slint-harness-hooks = { path = "crates/slint-harness-hooks", version = "0.1.0" }
 
 [workspace.lints.clippy]

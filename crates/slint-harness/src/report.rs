@@ -207,6 +207,24 @@ impl Report {
         }
     }
 
+    /// Adds `finding` as if [`Report::add`] had been called `times` times (a parallel run merges
+    /// a worker's already-counted findings this way). `times == 0` adds nothing.
+    pub(crate) fn add_repeated(&mut self, mut finding: Finding, times: usize) {
+        if times == 0 {
+            return;
+        }
+        if finding.state.is_empty() {
+            finding.state.clone_from(&self.context);
+        }
+        let key = finding.key();
+        let count = self.repeats.entry(key).or_insert(0);
+        let first = *count == 0;
+        *count += times;
+        if first {
+            self.findings.push(finding);
+        }
+    }
+
     /// Adds many findings, appending `state_suffix` (for example the window size) to their state.
     pub fn add_all(&mut self, findings: Vec<Finding>, state_suffix: &str) {
         for mut finding in findings {

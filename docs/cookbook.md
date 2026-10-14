@@ -208,6 +208,35 @@ let mut host = WizardHost { ctx, app: None };
 let stats = slint_harness::smoke::run(&mut host, &Smoke::new("wizard page 2"));
 ```
 
+## Floating layers and scoped smoke passes
+
+A toast, a floating panel or a popup is drawn above the content on purpose, so its controls
+"overlap" whatever lies below. List the layer types in `SweepOptions::floating_layers` (type
+name or any base name; the default is `["PopupWindow"]`): a control in a layer is never reported
+against a control outside it or in another layer, while two overlapping controls inside one layer
+still are.
+
+A smoke pass over an in-window dialog uses a `WindowView::subtree` named `Window/<scope>`. Its
+Close button destroys the scope, which is the control doing its job: `scope_may_close(true)`
+counts that in `SmokeStats::closed` instead of a `window-invalid` finding (a window without a `/`
+in its name going away stays a finding). When the scope has no element to root a view at, run
+the pass over the whole window and override `SmokeHost::admits` to admit only the controls the
+scope added; `admits` is applied to enumeration, lookup and the structure fingerprint.
+
+```rust
+Harness::new().sweep_options(SweepOptions {
+    floating_layers: vec!["Toast".into(), "PopupWindow".into(), "HelpPanel".into()],
+    ..SweepOptions::default()
+})
+
+let smoke = Smoke::new("confirm dialog").scope_may_close(true);
+
+// in a custom SmokeHost
+fn admits(&self, control: &Control) -> bool {
+    control.id.starts_with("ConfirmDialog::")
+}
+```
+
 ## Filtering scenarios while developing
 
 `SLINT_HARNESS_FILTER=open,save` runs the scenarios whose names contain `open` or `save`;
@@ -219,8 +248,38 @@ no report (README, Troubleshooting).
 
 ```text
 $ SLINT_HARNESS_FILTER=open,save cargo test --features ui-harness --test ui
-slint-harness 0.18.0 (Slint 1.18.1): 2 of 7 scenario(s) selected, report dir target/slint-harness/my-app
+slint-harness 0.18.3 (Slint 1.18.1): 2 of 7 scenario(s) selected, report dir target/slint-harness/my-app
 ```
+
+## Speed up a long suite
+
+A suite with many scenarios and long waits finishes sooner when scenarios run in several worker
+processes. No code change is needed to try it:
+
+```text
+$ SLINT_HARNESS_JOBS=auto cargo test --features ui-harness --test ui
+```
+
+`auto` starts one worker and adds one every 5 seconds while cores are idle and scenarios are
+waiting; `SLINT_HARNESS_JOBS=4` starts four at once. For an app that is heavy on the GPU or on
+memory, cap the workers so they do not slow each other down:
+
+```text
+$ SLINT_HARNESS_JOBS=auto SLINT_HARNESS_JOBS_MAX=2 cargo test --features ui-harness --test ui
+```
+
+To make it the suite's default, set it in code (the environment variables still override it):
+
+```rust
+Harness::new()
+    .jobs(Jobs::Auto)
+    .max_jobs(2)
+```
+
+The report is the same as a serial run's (plus one note naming the workers used), and the
+console prints each scenario's output in scenario order. Every worker re-runs `main`, so `main`
+must build the same harnesses in the same order and do nothing before `Harness::new()` that must
+not run twice (README, Parallel runs).
 
 ## Guarded paths for apps that use the dirs crate
 

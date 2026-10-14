@@ -24,7 +24,7 @@ use crate::{
     Attached,
     backend::pump,
     checks::SweepOptions,
-    coverage::record_activation,
+    coverage::{record_activation, record_wrappers},
     hooks::picker::take_failures,
     report::{Finding, Report},
     scene::Scene,
@@ -171,6 +171,12 @@ pub struct Smoke {
     /// Leave controls covered by a later modal backdrop out of the pass (they cannot be
     /// clicked by a user).
     pub skip_blocked: bool,
+    /// The views are scopes of a window, named `Window/<scope>` (the names
+    /// [`WindowView::subtree`] gives): a press that closes the scope (Got It, Cancel, Close ...)
+    /// is the control doing its job. A view whose root became invalid and whose name contains
+    /// `/` is counted in [`SmokeStats::closed`] instead of a `window-invalid` finding, the state
+    /// is restored and the pass continues. A window without `/` going away stays a finding.
+    pub scope_may_close: bool,
     pub(crate) before_restore: Option<BeforeRestore>,
 }
 
@@ -187,6 +193,7 @@ impl Smoke {
             always_restore: false,
             allowed_notices: Vec::new(),
             skip_blocked: true,
+            scope_may_close: false,
             before_restore: None,
         }
     }
@@ -244,6 +251,13 @@ impl Smoke {
         self
     }
 
+    /// Whether a view named `Window/<scope>` closing is expected (default `false`).
+    #[must_use]
+    pub const fn scope_may_close(mut self, on: bool) -> Self {
+        self.scope_may_close = on;
+        self
+    }
+
     /// The app's close routine, run on the old windows before every restore.
     #[must_use]
     pub fn before_restore(mut self, f: impl FnMut(&[Attached]) + 'static) -> Self {
@@ -283,6 +297,16 @@ pub trait SmokeHost {
     fn sweep_options(&self) -> SweepOptions {
         SweepOptions::default()
     }
+    /// Whether the pass may enumerate, locate and press `control`; the default admits
+    /// everything. Applied in `enumerate`, `locate` and the structure signature, also when
+    /// [`Smoke::skip_blocked`] is on.
+    ///
+    /// For example, in Indicatrix: a popup's content tree has no element a scope lookup can root
+    /// a view at, so the pass runs over the whole main window and admits only the controls the
+    /// popup added.
+    fn admits(&self, _control: &Control) -> bool {
+        true
+    }
 }
 
 /// Counters of one pass.
@@ -299,6 +323,8 @@ pub struct SmokeStats {
     pub blocked: usize,
     /// Controls that vanished before they could be activated.
     pub gone: usize,
+    /// Presses that closed the scope under test (expected, see [`Smoke::scope_may_close`]).
+    pub closed: usize,
     /// Times the state was re-established.
     pub restores: usize,
     /// Wall time of the pass in milliseconds.
@@ -347,16 +373,21 @@ fn candidates(
     view: &WindowView,
     skip_blocked: bool,
     options: &SweepOptions,
+    host: &dyn SmokeHost,
 ) -> (Vec<Control>, Vec<Control>) {
     if !skip_blocked {
-        let live = view.controls().into_iter().filter(is_candidate).collect();
+        let live = view
+            .controls()
+            .into_iter()
+            .filter(|c| is_candidate(c) && host.admits(c))
+            .collect();
         return (live, Vec::new());
     }
     let scene = Scene::build(view, options);
     let mut live = Vec::new();
     let mut blocked = Vec::new();
     for placed in scene.placed {
-        if !placed.interactive || !is_candidate(&placed.control) {
+        if !placed.interactive || !is_candidate(&placed.control) || !host.admits(&placed.control) {
             continue;
         }
         if placed.blocked {
@@ -374,12 +405,13 @@ fn enumerate(
     views: &[WindowView],
     skip_blocked: bool,
     options: &SweepOptions,
+    host: &dyn SmokeHost,
 ) -> (Vec<Target>, Vec<String>) {
     let mut targets = Vec::new();
     let mut blocked_controls = Vec::new();
     for (window, view) in views.iter().enumerate() {
         let mut seen: HashMap<String, usize> = HashMap::new();
-        let (live, blocked) = candidates(view, skip_blocked, options);
+        let (live, blocked) = candidates(view, skip_blocked, options, host);
         blocked_controls.extend(blocked.iter().map(Control::describe));
         for control in live {
             let key = control.key();
@@ -406,9 +438,10 @@ fn locate(
     target: &Target,
     skip_blocked: bool,
     options: &SweepOptions,
+    host: &dyn SmokeHost,
 ) -> Option<Control> {
     let view = views.get(target.window)?;
-    candidates(view, skip_blocked, options)
+    candidates(view, skip_blocked, options, host)
         .0
         .into_iter()
         .filter(|c| c.key() == target.key)
@@ -416,8 +449,13 @@ fn locate(
 }
 
 /// Sorted keys of every candidate control: a cheap fingerprint of the window's structure.
-fn signature(views: &[WindowView], skip_blocked: bool, options: &SweepOptions) -> Vec<String> {
-    let mut keys: Vec<String> = enumerate(views, skip_blocked, options)
+fn signature(
+    views: &[WindowView],
+    skip_blocked: bool,
+    options: &SweepOptions,
+    host: &dyn SmokeHost,
+) -> Vec<String> {
+    let mut keys: Vec<String> = enumerate(views, skip_blocked, options, host)
         .0
         .into_iter()
         .map(|t| format!("{}|{}|{}", t.window, t.key, t.occurrence))
@@ -459,7 +497,7 @@ fn run_pass(host: &mut dyn SmokeHost, smoke: &Smoke, stats: &mut SmokeStats) {
         );
         return;
     }
-    let (targets, blocked) = enumerate(&views, skip, &options);
+    let (targets, blocked) = enumerate(&views, skip, &options, &*host);
     stats.enumerated = targets.len();
     stats.blocked = blocked.len();
     for describe in &blocked {
@@ -467,7 +505,7 @@ fn run_pass(host: &mut dyn SmokeHost, smoke: &Smoke, stats: &mut SmokeStats) {
             "smoke skipped {describe} (covered by a modal backdrop)"
         ));
     }
-    let mut baseline = signature(&views, skip, &options);
+    let mut baseline = signature(&views, skip, &options, &*host);
     // Anything left over from earlier steps must not be blamed on the first click.
     let _ = take_panics();
     let _ = take_failures();
@@ -481,12 +519,12 @@ fn run_pass(host: &mut dyn SmokeHost, smoke: &Smoke, stats: &mut SmokeStats) {
                 .note(format!("smoke skipped {} ({reason})", target.describe));
             continue;
         }
-        let control = match locate(&views, target, skip, &options) {
+        let control = match locate(&views, target, skip, &options, &*host) {
             Some(control) if control.handle.is_valid() => control,
             _ => {
                 // Stale handle or a changed state: re-establish and look again.
                 match restore_into(host, &mut views, &mut baseline, stats, skip, &options) {
-                    Ok(()) => match locate(&views, target, skip, &options) {
+                    Ok(()) => match locate(&views, target, skip, &options, &*host) {
                         Some(control) => control,
                         None => {
                             stats.gone += 1;
@@ -502,7 +540,7 @@ fn run_pass(host: &mut dyn SmokeHost, smoke: &Smoke, stats: &mut SmokeStats) {
         let needs_restore = activate(host, smoke, &views, target, &control, stats);
         let changed = needs_restore
             || smoke.always_restore
-            || signature(&host.views(), skip, &options) != baseline;
+            || signature(&host.views(), skip, &options, &*host) != baseline;
         if changed && restore_into(host, &mut views, &mut baseline, stats, skip, &options).is_err()
         {
             return;
@@ -527,7 +565,7 @@ fn restore_into(
                 return Err(());
             }
             stats.restores += 1;
-            *baseline = signature(&fresh, skip_blocked, options);
+            *baseline = signature(&fresh, skip_blocked, options, &*host);
             *views = fresh;
             Ok(())
         }
@@ -554,6 +592,11 @@ fn activate(
     host.clear_notice();
     let settle = smoke.settle_ms;
     record_activation(&control.handle);
+    if let Some(view) = views.get(target.window) {
+        // The wrapper component around a standard widget carries the site's id (see
+        // `coverage::record_wrappers`).
+        record_wrappers(&view.root, &control.handle, false);
+    }
     let outcome = catch_unwind(AssertUnwindSafe(|| {
         control.handle.invoke_accessible_default_action();
         pump(settle);
@@ -607,6 +650,10 @@ fn activate(
     for view in views {
         if !view.root.is_valid() {
             broken = true;
+            if smoke.scope_may_close && view.name.contains('/') {
+                stats.closed += 1;
+                continue;
+            }
             add(
                 host.report(),
                 smoke,

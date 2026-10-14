@@ -9,6 +9,15 @@
 //! A scenario that panics ends there (a caught panic through Slint callbacks can leave component
 //! state unknown), becomes a `scenario-panic` finding, and the run goes on with the next one.
 //! A user profile with `panic = "abort"` disables this: the run then ends at the first panic.
+//!
+//! With `Jobs::Fixed` or `Jobs::Auto` the same binary becomes a coordinator that starts copies
+//! of itself as workers (see the `parallel` module); the scenario step (`run_scenario`) is shared
+//! by the serial loop and the worker. The default, `Jobs::Serial`, is the loop below, unchanged.
+
+mod jobs;
+
+pub use jobs::Jobs;
+pub(crate) use jobs::Plan;
 
 use crate::{
     Ctx,
@@ -16,7 +25,8 @@ use crate::{
     checks::SweepOptions,
     coverage::Coverage,
     panics::install_panic_recorder,
-    profile::Profile,
+    parallel::{self, CoordinatorSetup, WorkerSetup},
+    profile::{Profile, ProfileDir},
     report::{Finding, Format, Report},
     take_panics,
 };
@@ -24,10 +34,72 @@ use std::{
     panic::{AssertUnwindSafe, catch_unwind},
     path::{Path, PathBuf},
     process::ExitCode,
+    sync::atomic::{AtomicUsize, Ordering},
 };
 
 /// One named scenario.
 pub(crate) type ScenarioFn = Box<dyn FnMut(&mut Ctx<'_>) -> Result<(), Finding>>;
+
+/// How many times `run_to_report` has been called in this process: the index a parallel
+/// coordinator gives its workers, so a `main` with several harnesses runs the right one.
+static RUN_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+/// What one scenario step needs besides the scenario and the report.
+pub(crate) struct StepEnv<'a> {
+    pub(crate) profile: &'a ProfileDir,
+    pub(crate) sizes: &'a [(u32, u32)],
+    pub(crate) sweep_options: &'a SweepOptions,
+    pub(crate) seed: u64,
+}
+
+/// Runs one scenario: begin, the scenario under `catch_unwind` (a panic becomes a
+/// `scenario-panic` finding), the end-of-scenario health check, end. Returns the abort request
+/// the scenario (or the harness) made, if any; the caller tears down and ends the process. The
+/// serial loop and the parallel worker both call this, so the two cannot drift apart.
+pub(crate) fn run_scenario(
+    name: &str,
+    run: &mut ScenarioFn,
+    report: &mut Report,
+    env: &StepEnv<'_>,
+) -> Option<String> {
+    report.begin_scenario(name);
+    let _ = take_panics();
+    crate::hooks::picker::clear();
+    let outcome = {
+        let mut ctx = Ctx {
+            report: &mut *report,
+            profile: env.profile,
+            sizes: env.sizes,
+            sweep_options: env.sweep_options,
+            seed: env.seed,
+            notice: None,
+            clear_notice: None,
+        };
+        catch_unwind(AssertUnwindSafe(|| {
+            if let Err(finding) = run(&mut ctx) {
+                ctx.report.add(finding);
+            }
+            ctx.check_health("end of scenario");
+        }))
+    };
+    if outcome.is_err() {
+        let recorded = take_panics().join(" | ");
+        report.add(Finding::simple(
+            "scenario-panic",
+            format!("{name} aborted: {recorded}"),
+        ));
+    }
+    report.end_scenario(name);
+    crate::profile::take_abort_request()
+}
+
+/// `SLINT_HARNESS_SEED` as a number (0 when unset or invalid).
+pub(crate) fn resolve_seed() -> u64 {
+    std::env::var("SLINT_HARNESS_SEED")
+        .ok()
+        .and_then(|text| text.trim().parse::<u64>().ok())
+        .unwrap_or(0)
+}
 
 /// The harness: configuration plus the scenario list. Build it as the first statement of the
 /// test's `main`, then call [`Harness::run`]. See the crate documentation for a complete `main`.
@@ -36,7 +108,9 @@ pub(crate) type ScenarioFn = Box<dyn FnMut(&mut Ctx<'_>) -> Result<(), Finding>>
 /// that do not start with `-` filter too), `SLINT_HARNESS_SIZES` (`1366x768,720x480`, replaces
 /// [`Harness::sizes`]), `SLINT_HARNESS_FORMATS` (`md,html,txt`; `json` is accepted and ignored
 /// because it is always written; replaces [`Harness::formats`]), `SLINT_HARNESS_SEED` (u64, see
-/// [`Ctx::seed`]), `SLINT_HARNESS_ALLOW_FAIL` (any value: exit 0 even with findings).
+/// [`Ctx::seed`]), `SLINT_HARNESS_ALLOW_FAIL` (any value: exit 0 even with findings),
+/// `SLINT_HARNESS_JOBS` (`serial`, `1`, `auto` or a number; replaces [`Harness::jobs`]) and
+/// `SLINT_HARNESS_JOBS_MAX` (a number of at least 1; replaces [`Harness::max_jobs`]).
 pub struct Harness {
     pub(crate) report_dir: Option<PathBuf>,
     pub(crate) sizes: Vec<(u32, u32)>,
@@ -50,6 +124,10 @@ pub struct Harness {
     /// The test crate's `CARGO_MANIFEST_DIR` (run-time variable, set by `cargo test`), read
     /// before the profile moves the working directory.
     pub(crate) manifest_dir: PathBuf,
+    /// How many worker processes run the scenarios (default: none, serial).
+    pub(crate) jobs: Jobs,
+    /// The worker cap; `None` is the machine's parallelism.
+    pub(crate) max_jobs: Option<usize>,
 }
 
 impl Harness {
@@ -78,7 +156,26 @@ impl Harness {
             scenarios: Vec::new(),
             teardown: None,
             manifest_dir,
+            jobs: Jobs::Serial,
+            max_jobs: None,
         }
+    }
+
+    /// How many worker processes run the scenarios (see [`Jobs`]); the default is serial.
+    /// `SLINT_HARNESS_JOBS` replaces this value.
+    #[must_use]
+    pub const fn jobs(mut self, jobs: Jobs) -> Self {
+        self.jobs = jobs;
+        self
+    }
+
+    /// The most workers a parallel run starts (a cap for [`Jobs::Auto`] and [`Jobs::Fixed`];
+    /// 0 is treated as 1). The default is `std::thread::available_parallelism()`.
+    /// `SLINT_HARNESS_JOBS_MAX` replaces this value.
+    #[must_use]
+    pub fn max_jobs(mut self, max: usize) -> Self {
+        self.max_jobs = Some(max.max(1));
+        self
     }
 
     /// Where the report files go (`report.json` plus the selected [`Format`]s; use
@@ -173,6 +270,8 @@ impl Harness {
     /// to assert exact finding counts. An abort (exit code 2) still ends the process.
     #[must_use]
     pub fn run_to_report(self) -> Report {
+        let run_index = RUN_COUNTER.fetch_add(1, Ordering::SeqCst);
+        let worker_run = parallel::worker_run_index();
         let Self {
             report_dir,
             sizes,
@@ -183,6 +282,8 @@ impl Harness {
             mut scenarios,
             mut teardown,
             manifest_dir,
+            jobs,
+            max_jobs,
         } = self;
         let (env_filters, arg_filters) = scenario_filters();
         let filters: Vec<String> = env_filters.iter().chain(&arg_filters).cloned().collect();
@@ -198,6 +299,21 @@ impl Harness {
         // even when the run aborts later.
         let original_cwd = std::env::current_dir().unwrap_or_default();
         let report_dir = resolve_report_dir(report_dir, &original_cwd);
+        // A worker process runs only the harness whose run index the coordinator named; every
+        // other `run_to_report` call of the re-executed `main` returns an empty report at once.
+        if worker_run.is_some_and(|wanted| wanted != run_index) {
+            return Report::new(report_dir);
+        }
+        if worker_run.is_some() {
+            parallel::run_worker(WorkerSetup {
+                report_dir,
+                sizes,
+                profile,
+                sweep_options,
+                scenarios,
+                teardown,
+            });
+        }
         print_banner(selected, scenarios.len(), &report_dir);
         if selected == 0 && env_filters.is_empty() && !arg_filters.is_empty() {
             println!(
@@ -205,6 +321,32 @@ impl Harness {
                  (scenarios: {names:?}); nothing run, report not written"
             );
             return Report::new(report_dir);
+        }
+        let mut report = Report::new(report_dir);
+        let sizes = resolve_sizes(sizes, &mut report);
+        let formats = resolve_formats(formats, &mut report);
+        report.set_formats(formats);
+        let (jobs, max_jobs) = jobs::resolve(jobs, max_jobs, &mut report);
+        config_findings(&mut report, &env_filters, selected, &names);
+        if let Some(plan) = jobs::plan(jobs, max_jobs, selected) {
+            let chosen: Vec<usize> = names
+                .iter()
+                .enumerate()
+                .filter(|(_, name)| {
+                    filters.is_empty() || filters.iter().any(|f| name.contains(f.as_str()))
+                })
+                .map(|(index, _)| index)
+                .collect();
+            return parallel::coordinate(CoordinatorSetup {
+                report,
+                run_index,
+                plan,
+                names,
+                chosen,
+                coverage,
+                manifest_dir,
+                filtered: !filters.is_empty(),
+            });
         }
         // 1. Isolation first, while the process is still single-threaded.
         let profile = profile.unwrap_or_else(Profile::isolated).create();
@@ -215,51 +357,20 @@ impl Harness {
             crate::profile::abort_run(&message);
         }
         install_panic_recorder();
-
-        let mut report = Report::new(report_dir);
-        let sizes = resolve_sizes(sizes, &mut report);
-        let formats = resolve_formats(formats, &mut report);
-        report.set_formats(formats);
-        config_findings(&mut report, &env_filters, selected, &names);
-        let seed = std::env::var("SLINT_HARNESS_SEED")
-            .ok()
-            .and_then(|text| text.trim().parse::<u64>().ok())
-            .unwrap_or(0);
+        let seed = resolve_seed();
 
         // 3. Scenarios.
         for (name, run) in &mut scenarios {
             if !filters.is_empty() && !filters.iter().any(|f| name.contains(f.as_str())) {
                 continue;
             }
-            report.begin_scenario(name);
-            let _ = take_panics();
-            crate::hooks::picker::clear();
-            let outcome = {
-                let mut ctx = Ctx {
-                    report: &mut report,
-                    profile: &profile,
-                    sizes: &sizes,
-                    sweep_options: &sweep_options,
-                    seed,
-                    notice: None,
-                    clear_notice: None,
-                };
-                catch_unwind(AssertUnwindSafe(|| {
-                    if let Err(finding) = run(&mut ctx) {
-                        ctx.report.add(finding);
-                    }
-                    ctx.check_health("end of scenario");
-                }))
+            let env = StepEnv {
+                profile: &profile,
+                sizes: &sizes,
+                sweep_options: &sweep_options,
+                seed,
             };
-            if outcome.is_err() {
-                let recorded = take_panics().join(" | ");
-                report.add(Finding::simple(
-                    "scenario-panic",
-                    format!("{name} aborted: {recorded}"),
-                ));
-            }
-            report.end_scenario(name);
-            if let Some(message) = crate::profile::take_abort_request() {
+            if let Some(message) = run_scenario(name, run, &mut report, &env) {
                 if let Some(teardown) = teardown.take() {
                     teardown();
                 }
@@ -366,11 +477,7 @@ fn package_folder() -> Option<String> {
 
 /// The cargo target directory: the parent of `CARGO_TARGET_TMPDIR` (`compile_time` is the
 /// value `target_dir!` captured, else the run-time variable), else derived from the test
-/// binary, else `target` under the working directory. From the binary, the first ancestor that
-/// holds Cargo's `CACHEDIR.TAG` wins (Cargo writes it at the target-dir root only), which also
-/// covers the newer build-dir layout where test binaries live in
-/// `target/<profile>/build/<package>/<hash>/out/`; without the tag the old layout is assumed
-/// (`target/<profile>/deps/<test>` -> `target`).
+/// binary (see `target_of_exe`), else `target` under the working directory.
 #[doc(hidden)]
 #[must_use]
 pub fn target_dir_from(compile_time: Option<&str>) -> PathBuf {
@@ -389,19 +496,41 @@ fn target_dir_of(tmpdir: Option<&Path>, exe: Option<&Path>, cwd: &Path) -> PathB
     if let Some(parent) = tmpdir.and_then(Path::parent) {
         return parent.to_path_buf();
     }
-    let tagged = exe.and_then(|exe| {
-        exe.ancestors()
-            .skip(1)
-            .find(|dir| dir.join("CACHEDIR.TAG").is_file())
-    });
-    tagged
-        .or_else(|| exe.and_then(|exe| exe.parent().and_then(Path::parent).and_then(Path::parent)))
-        .map_or_else(|| cwd.join("target"), Path::to_path_buf)
+    exe.and_then(target_of_exe)
+        .unwrap_or_else(|| cwd.join("target"))
+}
+
+/// The target directory a test binary lives in, from the binary's own path:
+///
+/// 1. the two layouts Cargo uses, recognised by their folder names:
+///    `target/<profile>/deps/<test>` (and `examples/<example>`), and the newer build-dir layout
+///    `target/<profile>/build/<package>/<hash>/out/<test>` (nightly Cargo 1.100);
+/// 2. otherwise the first ancestor holding Cargo's `CACHEDIR.TAG` (written at the target-dir
+///    root only, and only by newer Cargo when it creates the folder);
+/// 3. otherwise three folders up (the old layout's rule).
+///
+/// The layout comes first because the tag is not reliable: a target folder created by an older
+/// Cargo never gets one. That is how 0.18.0 put the z-stackr GUI's report in
+/// `target/debug/build/z-stackr-gui/slint-harness/` on the new layout.
+fn target_of_exe(exe: &Path) -> Option<PathBuf> {
+    let up = |n: usize| exe.ancestors().nth(n);
+    let named = |n: usize, name: &str| up(n).and_then(Path::file_name).is_some_and(|f| f == name);
+    if named(1, "deps") || named(1, "examples") {
+        return up(3).map(Path::to_path_buf);
+    }
+    if named(1, "out") && named(4, "build") {
+        return up(6).map(Path::to_path_buf);
+    }
+    exe.ancestors()
+        .skip(1)
+        .find(|dir| dir.join("CACHEDIR.TAG").is_file())
+        .or_else(|| up(3))
+        .map(Path::to_path_buf)
 }
 
 /// The window sizes of the run: `SLINT_HARNESS_SIZES` (`WxH,WxH`) when set and valid, else
 /// `configured`. Invalid text is a `config` finding and the configured list is kept.
-fn resolve_sizes(configured: Vec<(u32, u32)>, report: &mut Report) -> Vec<(u32, u32)> {
+pub(crate) fn resolve_sizes(configured: Vec<(u32, u32)>, report: &mut Report) -> Vec<(u32, u32)> {
     let Ok(text) = std::env::var("SLINT_HARNESS_SIZES") else {
         return configured;
     };
@@ -556,9 +685,32 @@ mod tests {
         assert_eq!(package_folder().as_deref(), Some(env!("CARGO_PKG_NAME")));
     }
 
-    /// The newer build-dir layout puts test binaries four levels below the target dir; the
-    /// `CACHEDIR.TAG` Cargo writes at the target-dir root finds it, where the three-parents rule
-    /// would land inside `build/` (the stray `target/debug/build/<pkg>/slint-harness` reports).
+    /// The newer build-dir layout puts test binaries six levels below the target dir. It is
+    /// recognised by its folder names, WITHOUT a `CACHEDIR.TAG` (a target folder made by an older
+    /// Cargo has none: the z-stackr case, where 0.18.0's three-parents rule wrote the report to
+    /// `target/debug/build/z-stackr-gui/slint-harness/`). Pure paths, no files.
+    #[test]
+    fn target_dir_from_the_layout_without_a_tag() {
+        let cwd = Path::new("/cwd");
+        let new_layout = Path::new("/t/target/debug/build/z-stackr-gui/0123abcd/out/ui-0123.exe");
+        assert_eq!(
+            target_dir_of(None, Some(new_layout), cwd),
+            PathBuf::from("/t/target")
+        );
+        let old_layout = Path::new("/t/target/debug/deps/ui-0123.exe");
+        assert_eq!(
+            target_dir_of(None, Some(old_layout), cwd),
+            PathBuf::from("/t/target")
+        );
+        let example = Path::new("/t/target/release/examples/demo.exe");
+        assert_eq!(
+            target_dir_of(None, Some(example), cwd),
+            PathBuf::from("/t/target")
+        );
+    }
+
+    /// An unknown layout falls back to the ancestor that holds Cargo's `CACHEDIR.TAG`, which the
+    /// three-parents rule would miss here (it lands in `custom/`).
     #[test]
     fn target_dir_follows_the_cachedir_tag() {
         let root = std::env::temp_dir().join(format!(
@@ -567,12 +719,7 @@ mod tests {
         ));
         let _ = std::fs::remove_dir_all(&root);
         let target = root.join("target");
-        let out = target
-            .join("debug")
-            .join("build")
-            .join("app")
-            .join("0123")
-            .join("out");
+        let out = target.join("custom").join("runner").join("a").join("b");
         let made = std::fs::create_dir_all(&out)
             .and_then(|()| std::fs::write(target.join("CACHEDIR.TAG"), "Signature: x"));
         let found = target_dir_of(None, Some(&out.join("ui.exe")), Path::new("/cwd"));

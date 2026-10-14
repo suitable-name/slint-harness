@@ -1,6 +1,41 @@
 # Changelog
 
-## slint-harness 0.18.0 (unreleased)
+## slint-harness 0.18.3
+
+Ports the improvements the Indicatrix harness made after the crate was lifted from it.
+
+- Sweep: `SweepOptions::floating_layers` (default `["PopupWindow"]`): controls in a floating layer
+  (matched by type name or base) never overlap controls outside it; overlaps inside one layer are
+  still reported. A full `SweepOptions { .. }` literal needs the new field (use
+  `..SweepOptions::default()`).
+- Smoke: `SmokeHost::admits` (default true) restricts a pass to some controls of a view;
+  `Smoke::scope_may_close` counts a scoped view (`Window/<scope>`) that closes itself in
+  `SmokeStats::closed` instead of a `window-invalid` finding. Every smoke press also credits the
+  wrapper component's site id (`coverage::record_wrappers`).
+- Coverage: credit by element type and base type, single-site credit for computed labels, label
+  literals with escapes and interpolation, ids after an `if`/`for` prefix, one label literal per
+  statement, `coverage::record_wrappers` and `coverage::record_site_id`,
+  `Coverage::label_props` / `reader_props` / `callback_hint`. Parallel workers carry the new
+  credit.
+
+## slint-harness 0.18.2
+
+- Parallel runs (opt-in): `Harness::jobs(Jobs::Auto)` / `Jobs::Fixed(n)` and
+  `SLINT_HARNESS_JOBS=auto|<n>`, capped by `Harness::max_jobs` / `SLINT_HARNESS_JOBS_MAX`. The
+  test binary starts copies of itself as worker processes, each with its own profile; `Auto`
+  starts one worker and adds one every 5 s while at least 1.5 cores were idle. One merged
+  report, console output in scenario order. The default stays the serial run.
+- New check `worker-crash`: a worker process died during a scenario (parallel runs only).
+
+## slint-harness 0.18.1
+
+- Fix: the default report directory is found from the test binary's path on both Cargo
+  layouts (`target/<profile>/deps/` and the newer `target/<profile>/build/<package>/<hash>/out/`)
+  before looking for `CACHEDIR.TAG`. 0.18.0 relied on the tag, which a target folder made by an
+  older Cargo does not have, and then wrote the report to
+  `target/<profile>/build/<package>/slint-harness/<package>/` on nightly Cargo.
+
+## slint-harness 0.18.0
 
 First release. Serves Slint 1.18.1 (exact pin). Lifted from the Indicatrix UI harness.
 
@@ -28,7 +63,7 @@ First release. Serves Slint 1.18.1 (exact pin). Lifted from the Indicatrix UI ha
   follows Cargo's `CACHEDIR.TAG`, so the newer build-dir layout no longer puts reports under
   `target/<profile>/build/`.
 
-## slint-harness-hooks 0.1.0 (unreleased)
+## slint-harness-hooks 0.1.0
 
 First release.
 

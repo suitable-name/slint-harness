@@ -17,7 +17,7 @@ reading the environment at that point is a data race. Several runs in one proces
 that rule.
 
 Contents: Quick start, Examples, Hooks, Isolation, Aborts, Checks, Report formats, Console
-output, Coverage gate, Environment variables, Builder reference, Troubleshooting, Limits,
+output, Parallel runs, Coverage gate, Environment variables, Builder reference, Troubleshooting, Limits,
 Versions and the Slint pin, License.
 
 ## Quick start
@@ -43,7 +43,7 @@ the smallest app; `examples/notes` is the full one (see Examples).
    slint-build = "=1.18.1"
 
    [dev-dependencies]
-   slint-harness = "=0.18.0"
+   slint-harness = "=0.18.3"
 
    [[test]]
    name = "ui"
@@ -221,7 +221,7 @@ is on stderr, the findings made so far on stdout only.
 |---|---|
 | `outside-window` | an element sticks out of the window (scrolled-out content is accounted for) |
 | `zero-size` | an interactive control has no size |
-| `overlap` | two controls overlap (header and modal backdrops are accounted for) |
+| `overlap` | two controls overlap (header and modal backdrops and floating layers are accounted for) |
 | `missing-label` | an interactive control has no accessible label or placeholder |
 | `invisible-but-enabled` | an enabled control is (nearly) transparent |
 | `panic` | a panic on any thread, caught by the recorder |
@@ -236,6 +236,7 @@ is on stderr, the findings made so far on stdout only.
 | `not-found` | a `WindowView::find*` query matched nothing (similar labels are listed) |
 | `ambiguous-label` | `WindowView::find` matched several elements |
 | `coverage` | an uncovered UI action, or a stale allow-list entry |
+| `worker-crash` | a parallel-run worker process died during this scenario |
 | `config` | a bad environment variable, an unmatched SLINT_HARNESS_FILTER, a harness without scenarios, or a report file that could not be written or removed |
 
 Identical findings are merged with a repeat count. The report lists every scenario with its
@@ -261,7 +262,7 @@ run wrote. The finding texts are the same in every format.
 
 ## Console output
 
-Every line starts with `slint-harness`. In order: the banner (`slint-harness 0.18.0 (Slint
+Every line starts with `slint-harness`. In order: the banner (`slint-harness 0.18.3 (Slint
 1.18.1): 7 of 7 scenario(s) selected, report dir ...`), the profile directory and the guarded
 paths, one `scenario <name>` line per scenario with its `-> N finding(s), M ms`, the smoke
 counters, the coverage counters, the report files written, then `PASS, no findings` or `FAIL,
@@ -269,6 +270,60 @@ N finding(s):` with the per-check counts and up to 25 findings as `[window] chec
 detail (xN) [state]` (the rest: `... N more in <dir>`). Aborts go to stderr as
 `slint-harness: ABORT: <cause and what to change>`. No color, no cursor movement: the output
 reads the same in a CI log and in a screen reader.
+
+## Parallel runs
+
+Opt-in; the default is the serial run described so far. A suite with many scenarios, long waits
+(`ctx.wait_for`, threads that settle slowly) and a machine with idle cores finishes sooner when
+scenarios run side by side. A suite whose scenarios are short and CPU-bound gains little, and
+the extra processes cost start-up time.
+
+```rust
+Harness::new()
+    .jobs(Jobs::Auto)      // or Jobs::Fixed(4); Jobs::Serial is the default
+    .max_jobs(4)           // cap for Auto and Fixed; default: the number of cores
+    // ... scenarios ...
+```
+
+`SLINT_HARNESS_JOBS=serial|1|auto|<n>` replaces `jobs` and `SLINT_HARNESS_JOBS_MAX=<n>` (at
+least 1) replaces `max_jobs`, so `SLINT_HARNESS_JOBS=auto cargo test --test ui` needs no code
+change; an invalid value is a `config` finding and the configured value is kept.
+
+How it works. Threads are not an option (Slint's platform, the profile's environment redirect
+and the hooks are per process), so the test binary becomes a coordinator that starts copies of
+itself as worker processes. Each worker has its own throw-away profile, environment, hooks,
+panic recorder and mock time, and runs one scenario at a time. `Jobs::Fixed(n)` starts `n`
+workers at once; `Jobs::Auto` starts one and adds another every 5 seconds while at least 1.5
+cores were idle over the last interval and scenarios are still waiting, up to the cap. The
+number of workers never exceeds the number of selected scenarios; one scenario, or `Fixed(1)`,
+runs serial.
+
+What stays the same. The console shows each scenario's output in scenario order, not in
+completion order; output outside scenarios (worker setup and teardown) is printed as it arrives,
+prefixed `slint-harness: worker <k>: `. The result is one report: findings, repeat counts,
+per-check totals and the scenario list are identical to a serial run of the same suite, with one
+extra note, `parallel run: <n> worker(s) used, peak <p> at once`. The coverage gate sees the
+union of what all workers reached.
+
+Rules for your `main`. A parallel run re-executes `main` in every worker, so `main` must build
+the same harnesses in the same order and do nothing before them that must not run twice;
+`Harness::new()` as the first statement is already the rule. A test with several harnesses in
+one `main` works. A worker reports a scenario list that differs from the coordinator's (a
+scenario name behind an index does not match) as a `config` finding for that scenario.
+
+Crashes and aborts. A worker that dies during a scenario (`process::abort`, `panic = "abort"`, a
+stack overflow) gives a `worker-crash` finding for that scenario, with the exit status and the
+worker's last output lines; the other scenarios still run on a replacement worker. The dead
+worker's profile directory may be left behind in the temp dir, and the finding says so. A worker
+that dies before it is ready three times in a row aborts the run (exit code 2). An abort
+requested by a scenario (`request_abort`) or raised during worker setup stops the whole run: the
+other workers finish their current scenario, run the teardown and delete their profiles, then
+the run ends with exit code 2.
+
+Keep a suite serial when its numbers are compared against a baseline taken from a serial run
+(finding counts do not change, wall times and console interleaving do), or when the machine is
+the limit: a GPU-heavy app is slowed by workers sharing one GPU, so cap them with
+`SLINT_HARNESS_JOBS_MAX`.
 
 ## Coverage gate
 
@@ -300,6 +355,35 @@ An entry that matches nothing is a `coverage` finding too (stale). `GateRule` sa
 gate runs: `NoFilter` (default: skipped under a scenario filter), `Always`, or `Armed` (only
 when a scenario called `slint_harness::coverage::arm_gate()`), set with `.gate_when(..)`.
 
+### How an element is matched, and what to configure
+
+An element is credited by, in order: the single-site rule (its label is computed, its element
+type has exactly one site in the whole inventory and the run activated or fetched an element of
+that type; an app component is also credited by the base names of the activated element), its
+`Component::id`, then a `(type, label)` pair whose label matches the site's literal. Literals are
+compared as the running element shows them: escapes (`\"`, `\\`, `\n`, `\u{2026}`) are resolved,
+an interpolation (`"Layer \{i}"`) splits the literal into fixed pieces (at least three fixed
+characters are needed), and the label must start and end with them unless the component adds to
+the label. An element id behind `if cond:` or `for x in y:` is the text after the last colon, and
+a one-line element with several literals gives each property its own.
+
+- `Coverage::label_props(&["reader_label"])`: extra property names read as labels, for wrapper
+  components that carry the announced label in a property of their own.
+- `Coverage::reader_props(&["reader_label"])`: of those, the ones whose literal wins over `text`
+  on a wrapper site (the running accessible label is the reader label when the site sets one).
+  Naming a property here also reads it as a label. Both default to empty.
+- `Coverage::callback_hint("add a row to the callback table")`: the advice at the end of a
+  callback-gap finding (`callback never invoked (file:line); <hint>`).
+- `slint_harness::coverage::record_wrappers(&view.root, &pressed, touched)`: a wrapper component
+  carries the site id on its own root while the element a scenario presses is the widget inside
+  it; this records the ids of every element at the pressed element's rectangle (0.6 px
+  tolerance). The smoke pass calls it for every activation; call it yourself when a scenario
+  presses a wrapper by hand.
+- `slint_harness::coverage::record_site_id("Component::site-id")`: credits a site directly, for a
+  press whose element reports another id.
+
+A parallel run carries all of these recorder sets from the workers to the coordinator.
+
 ## Environment variables
 
 | Variable | Effect |
@@ -307,6 +391,8 @@ when a scenario called `slint_harness::coverage::arm_gate()`), set with `.gate_w
 | `SLINT_HARNESS_FILTER` | comma-separated scenario name substrings to run (positional arguments that do not start with `-` filter too); positional arguments that match no scenario run nothing and write no report (that is cargo handing another target's filter to this one), an unmatched `SLINT_HARNESS_FILTER` is a `config` finding |
 | `SLINT_HARNESS_SIZES` | `1366x768,720x480`; replaces `Harness::sizes` |
 | `SLINT_HARNESS_FORMATS` | `md,html,txt`: the report files besides `report.json`, which is always written; replaces `Harness::formats`; `json` is accepted and ignored, empty means JSON only, an unknown name is a `config` finding |
+| `SLINT_HARNESS_JOBS` | `serial`, `1`, `auto` or a worker count: how many worker processes run the scenarios (Parallel runs); replaces `Harness::jobs`; default serial, an invalid value is a `config` finding |
+| `SLINT_HARNESS_JOBS_MAX` | worker cap for `auto` and a fixed count, at least 1; replaces `Harness::max_jobs`; default the number of cores, an invalid value is a `config` finding |
 | `SLINT_HARNESS_SEED` | `u64` for scenarios that randomise (`ctx.seed()`), default 0 |
 | `SLINT_HARNESS_ALLOW_FAIL` | any value: exit code 0 even with findings |
 | `SLINT_EMIT_DEBUG_INFO` | `1` at compile time: Slint debug info |
@@ -323,7 +409,19 @@ Exit codes: 0 clean, 1 findings, 2 aborted (isolation could not be proven, no de
   `[Format::Markdown]`); see Report formats.
 - `profile`: `Profile::isolated().name_prefix(..).guard_paths(..)`.
 - `coverage`: the opt-in coverage gate (above).
+- `jobs` / `max_jobs`: serial (default), a fixed number of worker processes or `Jobs::Auto`,
+  and the cap; see Parallel runs.
 - `sweep_options(SweepOptions { .. })`: the thresholds; the defaults are the Indicatrix ones.
+  `floating_layers` (default `["PopupWindow"]`) lists the type names, or base names, of layers
+  drawn above the content on purpose (a toast, a floating panel): a control inside a layer never
+  overlaps a control outside it or in another layer; overlaps inside one layer are still
+  reported.
+- `Smoke` options: `deny_rules`, `skip_blocked`, `always_restore`, `allowed_notices`,
+  `max_controls`, `before_restore` and `scope_may_close(true)`. The last is for passes over
+  views named `Window/<scope>` (the names `WindowView::subtree` is given by convention): a press
+  that closes the scope is counted in `SmokeStats::closed` instead of reported as
+  `window-invalid`. A custom `SmokeHost` may override `admits(&Control)` to restrict the pass to
+  some controls (default: all).
 - `scenario`: one named journey.
 - `teardown`: runs after the last scenario and the gate, before the profile is deleted: stop
   threads, flush files.
@@ -340,7 +438,7 @@ The prelude (`use slint_harness::prelude::*`) brings `Harness`, `Ctx`, `Attached
 `WindowView`, `Control`, `ElementHandle`, `ElementRoot`, `AccessibleRole`, `Finding`, `Format`,
 `Report`, `Profile`, `ProfileDir`, `Smoke`, `SmokeStats`, `DenyRule`, `DenyField`, `DenyMatch`,
 `DEFAULT_DENY`, `SweepOptions`, `Coverage`, `GateRule`, `record_callback`, `arm_gate`,
-`SLINT_VERSION`, `pump`, `settle`, `wait_until` and `std::process::ExitCode`. API details are
+`Jobs`, `SLINT_VERSION`, `pump`, `settle`, `wait_until` and `std::process::ExitCode`. API details are
 on docs.rs; recipes (secondary windows, threads, sticky notices, deny lists from data, key
 chords, `report.json` in CI, a custom `SmokeHost`) are in `docs/cookbook.md`.
 

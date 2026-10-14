@@ -14,7 +14,6 @@
 
 /// A string literal found by [`scan`].
 pub struct RawString {
-    pub line: usize,
     pub text: String,
 }
 
@@ -135,13 +134,9 @@ pub fn scan(source: &str) -> Scanned {
             }
         } else if ch == '"' {
             masked.push('"');
-            let start_line = line;
             let mut text = String::new();
             i = read_string(&chars, i + 1, &mut line, &mut masked, &mut text);
-            strings.push(RawString {
-                line: start_line,
-                text,
-            });
+            strings.push(RawString { text });
         } else {
             if ch == '\n' {
                 line += 1;

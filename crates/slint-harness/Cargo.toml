@@ -1,6 +1,6 @@
 [package]
 name = "slint-harness"
-version = "0.18.0"
+version = "0.18.3"
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
@@ -67,6 +67,22 @@ harness = false
 
 [[test]]
 name = "runner"
+harness = false
+
+[[test]]
+name = "parallel"
+harness = false
+
+[[test]]
+name = "floating_layers"
+harness = false
+
+[[test]]
+name = "smoke_scope"
+harness = false
+
+[[test]]
+name = "coverage_matching"
 harness = false
 
 [lints]

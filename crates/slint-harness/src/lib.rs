@@ -69,9 +69,11 @@
 pub mod backend;
 pub mod checks;
 pub mod coverage;
+mod cpu;
 mod ctx;
 pub mod keys;
 mod panics;
+mod parallel;
 pub mod profile;
 mod render;
 pub mod report;
@@ -83,7 +85,7 @@ pub mod view;
 pub use ctx::{Attached, Ctx, Hooks};
 pub use i_slint_backend_testing::{AccessibleRole, ElementHandle, ElementRoot};
 pub use panics::take_panics;
-pub use runner::{Harness, target_dir_from};
+pub use runner::{Harness, Jobs, target_dir_from};
 pub use slint_harness_hooks as hooks;
 
 /// The exact Slint version this release of the harness is built against: the `=` pin on
@@ -97,10 +99,13 @@ pub const SLINT_VERSION: &str = "1.18.1";
 /// signature included.
 pub mod prelude {
     pub use crate::{
-        AccessibleRole, Attached, Ctx, ElementHandle, ElementRoot, Harness, Hooks, SLINT_VERSION,
+        AccessibleRole, Attached, Ctx, ElementHandle, ElementRoot, Harness, Hooks, Jobs,
+        SLINT_VERSION,
         backend::{pump, settle, wait_until},
         checks::SweepOptions,
-        coverage::{Coverage, GateRule, arm_gate, record_callback},
+        coverage::{
+            Coverage, GateRule, arm_gate, record_callback, record_site_id, record_wrappers,
+        },
         profile::{Profile, ProfileDir},
         report::{Finding, Format, Report},
         smoke::{DEFAULT_DENY, DenyField, DenyMatch, DenyRule, Smoke, SmokeStats},

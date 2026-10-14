@@ -27,6 +27,11 @@
 //! computed by an expression) cannot be tracked; the section counts and lists them (each is a
 //! candidate for an `id` in the UI) but they are not findings.
 //!
+//! The matching rules (single-site credit, ids, label pairs, escapes and interpolations in
+//! literals) are in `matching.rs`; the extension points for apps with their own label properties
+//! are [`Coverage::label_props`] and [`Coverage::reader_props`]; scenarios that press a wrapper
+//! component by hand credit it with [`record_wrappers`] or [`record_site_id`].
+//!
 //! Known limits of the text scanner behind the inventory: component names must start with a
 //! capital letter, `import { X as Y }` renames are not followed, `@children` slots and `states`
 //! blocks are opaque, and labels built by expressions are untrackable. See the inventory module.
@@ -36,14 +41,22 @@
 
 mod allow;
 mod inventory;
+mod matching;
+mod parse;
+mod props;
 pub mod recorder;
 mod scan;
 
-pub use recorder::{record_activation, record_callback, record_touch, recorded_callbacks};
+pub use recorder::{
+    record_activation, record_callback, record_site_id, record_touch, record_wrappers,
+    recorded_callbacks,
+};
 
 use crate::report::{Finding, Report};
 use allow::AllowList;
-use inventory::{ElementItem, Label, load_inventory};
+use inventory::load_inventory;
+use matching::{Reach, reach_of, single_site_types};
+use props::LabelProps;
 use recorder::{Recorder, recorder};
 use std::{
     collections::BTreeSet,
@@ -76,7 +89,15 @@ pub struct Coverage {
     pub(crate) allow: Vec<(String, String)>,
     /// When the gate runs.
     pub(crate) gate: GateRule,
+    /// Extra property names read as labels, and the subset that beats `text` on wrappers.
+    pub(crate) props: LabelProps,
+    /// The advice at the end of a callback-gap finding.
+    pub(crate) callback_hint: String,
 }
+
+/// The default advice of a callback-gap finding.
+const DEFAULT_CALLBACK_HINT: &str =
+    "add a scenario that invokes it or an allow entry with a reason";
 
 impl Coverage {
     /// Scans `dir/**/*.slint` (relative to the test crate's manifest directory).
@@ -87,6 +108,8 @@ impl Coverage {
             allow_file: None,
             allow: Vec::new(),
             gate: GateRule::default(),
+            props: LabelProps::default(),
+            callback_hint: DEFAULT_CALLBACK_HINT.to_owned(),
         }
     }
 
@@ -108,6 +131,39 @@ impl Coverage {
         self
     }
 
+    /// Reads these property names as labels too, in addition to the std list (`accessible-label`,
+    /// `text`, `label`, `title`, `hint`, `name`). For an app whose wrapper components carry the
+    /// label the screen reader announces in a property of their own (for example, in Indicatrix,
+    /// `reader_label` and `slider_label`). Names match exactly as spelled in the source.
+    #[must_use]
+    pub fn label_props(mut self, names: &[&str]) -> Self {
+        self.props
+            .extra
+            .extend(names.iter().map(|n| (*n).to_owned()));
+        self
+    }
+
+    /// Properties whose LITERAL wins over `text` as the label of a non-std wrapper site, because
+    /// the running accessible label is that property when the site sets one (for example, in
+    /// Indicatrix, `reader_label` on `TipButton`). They are read as labels too, so naming a
+    /// property here is enough; `label_props` alone never overrides `text`.
+    #[must_use]
+    pub fn reader_props(mut self, names: &[&str]) -> Self {
+        self.props
+            .reader
+            .extend(names.iter().map(|n| (*n).to_owned()));
+        self
+    }
+
+    /// Replaces the advice at the end of a callback-gap finding, whose detail reads
+    /// `callback never invoked ({file}:{line}); {hint}`. The default is "add a scenario that
+    /// invokes it or an allow entry with a reason".
+    #[must_use]
+    pub fn callback_hint(mut self, hint: impl Into<String>) -> Self {
+        self.callback_hint = hint.into();
+        self
+    }
+
     /// Sets when the gate runs.
     #[must_use]
     pub const fn gate_when(mut self, rule: GateRule) -> Self {
@@ -125,51 +181,14 @@ pub fn arm_gate() {
     ARMED.store(true, Ordering::SeqCst);
 }
 
-/// How the run reached an element.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Reach {
-    Activated,
-    Touched,
-    Missed,
+/// Whether [`arm_gate`] was called in this process (a parallel run reads it from each worker).
+pub(crate) fn is_armed() -> bool {
+    ARMED.load(Ordering::SeqCst)
 }
 
-fn reach_of(item: &ElementItem, rec: &Recorder) -> Reach {
-    if let Some(id) = item.runtime_id() {
-        if rec.activated_ids.contains(&id) {
-            return Reach::Activated;
-        }
-        if rec.touched_ids.contains(&id) {
-            return Reach::Touched;
-        }
-    }
-    if let Label::Literal(text) = &item.label {
-        let hit_pair = |pairs: &BTreeSet<(String, String)>| {
-            pairs.iter().any(|(ty, label)| {
-                *ty == item.match_ty
-                    && if item.composed {
-                        label.contains(text.as_str())
-                    } else {
-                        label == text
-                    }
-            })
-        };
-        if hit_pair(&rec.activated_pairs) {
-            return Reach::Activated;
-        }
-        if hit_pair(&rec.touched_pairs) {
-            return Reach::Touched;
-        }
-        // An inline element that declares its role itself is also recognised by its label alone.
-        if !item.site {
-            if rec.activated_labels.contains(text) {
-                return Reach::Activated;
-            }
-            if rec.touched_labels.contains(text) {
-                return Reach::Touched;
-            }
-        }
-    }
-    Reach::Missed
+/// Sets the armed flag (a parallel run: a worker's scenario called [`arm_gate`]).
+pub(crate) fn set_armed(armed: bool) {
+    ARMED.store(armed, Ordering::SeqCst);
 }
 
 fn push_list(out: &mut String, title: &str, lines: &[String]) {
@@ -202,13 +221,19 @@ struct Outcome {
 }
 
 /// Compares the recorder with the inventory and the allow list.
-fn evaluate(inventory: &inventory::Inventory, allow: &AllowList, rec: &Recorder) -> Outcome {
+fn evaluate(
+    inventory: &inventory::Inventory,
+    allow: &AllowList,
+    rec: &Recorder,
+    callback_hint: &str,
+) -> Outcome {
     let mut out = Outcome {
         callbacks: inventory.callbacks.len(),
         elements: inventory.elements.len(),
         ..Outcome::default()
     };
     let mut keys: BTreeSet<String> = BTreeSet::new();
+    let single = single_site_types(inventory);
 
     for item in &inventory.callbacks {
         keys.insert(item.key.clone());
@@ -228,8 +253,7 @@ fn evaluate(inventory: &inventory::Inventory, allow: &AllowList, rec: &Recorder)
                 item.key.clone(),
                 "coverage",
                 format!(
-                    "callback never invoked ({}:{}); add a scenario that invokes it or an allow \
-                     entry with a reason",
+                    "callback never invoked ({}:{}); {callback_hint}",
                     item.file, item.line
                 ),
             ));
@@ -239,7 +263,7 @@ fn evaluate(inventory: &inventory::Inventory, allow: &AllowList, rec: &Recorder)
     for item in &inventory.elements {
         let key = item.key();
         keys.insert(key.clone());
-        match reach_of(item, rec) {
+        match reach_of(item, rec, &single) {
             Reach::Activated => out.activated += 1,
             Reach::Touched => out.touched += 1,
             Reach::Missed => {
@@ -343,7 +367,7 @@ pub(crate) fn finish(
         _ => {}
     }
     let root = manifest_dir.join(&coverage.scan_root);
-    let inventory = load_inventory(&root);
+    let inventory = load_inventory(&root, &coverage.props);
     if inventory.callbacks.is_empty() && inventory.elements.is_empty() {
         report.add(Finding::new(
             "-",
@@ -361,7 +385,7 @@ pub(crate) fn finish(
     let (allow, allow_error) = AllowList::load(&coverage.allow, allow_path.as_deref());
     let outcome = {
         let rec = recorder();
-        evaluate(&inventory, &allow, &rec)
+        evaluate(&inventory, &allow, &rec, &coverage.callback_hint)
     };
     report.add_section("Coverage", render_section(&outcome));
     println!(

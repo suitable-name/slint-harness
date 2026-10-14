@@ -22,6 +22,16 @@
 //!    overlap (the two HelpButtons 2 px apart, "Solid view" and "starting a design") do not
 //!    qualify: neither is a `TouchArea`, so they stay reported.
 //!
+//! 4. a control inside a floating layer against a control outside it or in another layer
+//!    ([`SweepOptions::floating_layers`]). For example, in Indicatrix: the `Toast` ("Dismiss this
+//!    message" sits above the status strip on purpose) and every `PopupWindow` (`FilterPanel`,
+//!    `ImportDialog`, `RemoteWorkerDialog`, `VerdictPopover`) are drawn above the content and
+//!    cover it by design, as do the guide panel (`GuideOverlayLayer`, draggable, collapses to a
+//!    pill) and the floating `ParametersPanel` over the viewport toolbar. Overlaps WITHIN one
+//!    layer are still reported. A full-window modal `Rectangle` WITHOUT a backdrop `TouchArea`
+//!    (`PreviewBatchDialog`: its only `TouchArea {}` is card-sized, so clicks beside the card
+//!    reach the editor) is NOT a layer: that is a real defect.
+//!
 //! Invisible (opacity at or below [`SweepOptions::invisible_opacity`]), disabled and
 //! scrolled-out controls take no part.
 
@@ -60,7 +70,11 @@ pub(super) fn check_overlaps(
             if overlap_w <= tol || overlap_h <= tol {
                 continue;
             }
-            if ra.contains(rb, tol) || rb.contains(ra, tol) || on_backdrop(a, b, options) {
+            if a.layer != b.layer
+                || ra.contains(rb, tol)
+                || rb.contains(ra, tol)
+                || on_backdrop(a, b, options)
+            {
                 continue;
             }
             findings.push(finding(

@@ -1706,7 +1706,7 @@ dependencies = [
 
 [[package]]
 name = "slint-harness"
-version = "0.18.0"
+version = "0.18.3"
 dependencies = [
  "i-slint-backend-testing",
  "serde",

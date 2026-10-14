@@ -8,7 +8,8 @@
 //! * `zero-size` (`control.rs`): a visible interactive control has no width or no height;
 //! * `overlap` (`overlap.rs`): two enabled interactive controls overlap partially, measured on
 //!   their visible parts; containment, controls under a modal backdrop and controls laid on a
-//!   header-size `TouchArea` on purpose are not overlaps;
+//!   header-size `TouchArea` on purpose, and controls in different floating layers
+//!   ([`SweepOptions::floating_layers`]) are not overlaps;
 //! * `missing-label` (`control.rs`): a visible interactive control has no accessible label (a
 //!   placeholder text counts as a label);
 //! * `invisible-but-enabled` (`control.rs`): an enabled interactive control whose combined
@@ -51,6 +52,17 @@ pub struct SweepOptions {
     pub header_max_h: f32,
     /// Fraction of a control that must lie inside a header backdrop to be "laid on it".
     pub header_inside: f32,
+    /// Type names of floating layers: an element whose type name, or any of whose base names,
+    /// is in this list roots a layer drawn above the content on purpose. A control inside a
+    /// layer never overlaps a control outside it or in another layer; overlaps within one layer
+    /// are still reported. Default: `["PopupWindow"]`.
+    ///
+    /// For example, in Indicatrix: `Toast` ("Dismiss this message" sits above the status strip),
+    /// every `PopupWindow`, the guide panel (`GuideOverlayLayer`) and `ParametersPanel` (the
+    /// docked mount shares the type name, so its controls are exempt against outside controls
+    /// too; accepted). A full-window modal `Rectangle` WITHOUT a backdrop `TouchArea` is not a
+    /// layer and stays a real overlap.
+    pub floating_layers: Vec<String>,
 }
 
 impl Default for SweepOptions {
@@ -64,6 +76,7 @@ impl Default for SweepOptions {
             modal_cover: 0.25,
             header_max_h: 32.0,
             header_inside: 0.75,
+            floating_layers: vec!["PopupWindow".to_string()],
         }
     }
 }

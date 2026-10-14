@@ -116,6 +116,8 @@ pub(crate) struct Placed {
     pub(crate) interactive: bool,
     /// Covered by a later modal layer, so it cannot be clicked.
     pub(crate) blocked: bool,
+    /// Index of the enclosing floating layer root ([`SweepOptions::floating_layers`]), if any.
+    pub(crate) layer: Option<usize>,
 }
 
 /// The elements of a window with their clipped geometry and layers.
@@ -131,10 +133,20 @@ impl Scene {
         let mut stack: Vec<(usize, Rect)> = Vec::new();
         let mut visibles: Vec<Rect> = Vec::with_capacity(elements.len());
         let mut blockers: Vec<(usize, Rect)> = Vec::new();
+        // (end index, root index): a floating layer opens a range of its descendants too.
+        let mut layers: Vec<(usize, usize)> = Vec::new();
+        let mut layer_of: Vec<Option<usize>> = Vec::with_capacity(elements.len());
         for (index, handle) in elements.iter().enumerate() {
             while stack.last().is_some_and(|(end, _)| index >= *end) {
                 stack.pop();
             }
+            while layers.last().is_some_and(|(end, _)| index >= *end) {
+                layers.pop();
+            }
+            if is_layer_root(handle, &options.floating_layers) {
+                layers.push((index + 1 + descendant_count(handle), index));
+            }
+            layer_of.push(layers.last().map(|(_, root)| *root));
             let clip = stack.last().map_or(Rect::UNBOUNDED, |(_, c)| *c);
             let visible = Rect::of(handle).intersect(&clip);
             let type_name = handle
@@ -180,10 +192,25 @@ impl Scene {
                 visible,
                 interactive,
                 blocked,
+                layer: layer_of[index],
             });
         }
         Self { placed }
     }
+}
+
+/// Whether the element roots a floating layer: its type name, or any base name, is in `layers`.
+/// For example, in Indicatrix: `Toast`, `PopupWindow`, `GuideOverlayLayer`, `ParametersPanel`.
+pub(crate) fn is_layer_root(handle: &ElementHandle, layers: &[String]) -> bool {
+    if layers.is_empty() {
+        return false;
+    }
+    handle
+        .type_name()
+        .is_some_and(|t| layers.iter().any(|l| l.as_str() == t.as_str()))
+        || handle
+            .bases()
+            .is_some_and(|mut bases| bases.any(|b| layers.iter().any(|l| l.as_str() == b.as_str())))
 }
 
 /// Whether the element is a `Flickable` (the viewport inside every `ScrollView` / `ListView`).

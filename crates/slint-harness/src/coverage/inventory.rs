@@ -29,6 +29,11 @@
 //! the gate only sees [`Inventory`].
 
 use super::{
+    parse::{
+        component_header, element_id, element_type, handler_name, is_ident_char, parse_callback,
+        property_value,
+    },
+    props::LabelProps,
     recorder::normalise_id,
     scan::{Event, Kind, events, scan},
 };
@@ -187,6 +192,18 @@ pub struct Inventory {
     components: Vec<(String, Option<String>)>,
 }
 
+impl Inventory {
+    /// The names of every component declared under the scan root (not the builtin elements). The
+    /// single-site credit uses it to tell an app component from a builtin such as `Rectangle`.
+    #[must_use]
+    pub fn component_names(&self) -> BTreeSet<String> {
+        self.components
+            .iter()
+            .map(|(name, _)| name.clone())
+            .collect()
+    }
+}
+
 /// The interactive types and the inner elements their wrapper sites replace.
 struct TypeTable {
     types: BTreeMap<String, TypeInfo>,
@@ -215,72 +232,6 @@ const PREFERRED_PROPS: &[&str] = &["text", "label", "title", "name", "hint"];
 /// Where a std widget's label comes from.
 const STD_LABEL_ORDER: &[&str] = &["accessible-label", "text", "title"];
 
-// ---- parsing helpers (the statement helpers of Indicatrix tests/ui_static.rs) ----
-
-fn is_ident_char(ch: char) -> bool {
-    ch.is_alphanumeric() || ch == '_' || ch == '-'
-}
-
-/// `(is_global, name, base)` of a `[export] component|global Name [inherits Base]` header.
-fn component_header(stmt: &str) -> Option<(bool, String, Option<String>)> {
-    let words: Vec<&str> = stmt.split_whitespace().collect();
-    let at = words
-        .iter()
-        .position(|w| *w == "component" || *w == "global")?;
-    let name = (*words.get(at + 1)?).to_owned();
-    let base = (words.get(at + 2) == Some(&"inherits"))
-        .then(|| words.get(at + 3).map(|w| (*w).to_owned()))
-        .flatten();
-    Some((words[at] == "global", name, base))
-}
-
-/// The type of an element statement (`Type`, `id := Type`, `if c: Type`, `for x in y: Type`).
-fn element_type(stmt: &str) -> Option<String> {
-    let s = stmt.trim();
-    let tail = if let Some((_, after)) = s.split_once(":=") {
-        after
-    } else if s.starts_with("if ") || s.starts_with("for ") {
-        s.rsplit_once(':')?.1
-    } else {
-        s
-    };
-    let word: String = tail
-        .trim()
-        .chars()
-        .take_while(|c| is_ident_char(*c) || *c == '.')
-        .collect();
-    word.chars().next()?.is_uppercase().then_some(word)
-}
-
-/// The callback name of a handler header such as `clicked =>` or `edited(text) =>`.
-fn handler_name(stmt: &str) -> Option<String> {
-    let head = stmt.trim().trim_end_matches("=>").trim();
-    let name: String = head.chars().take_while(|c| is_ident_char(*c)).collect();
-    let rest = head[name.len()..].trim();
-    (!name.is_empty() && (rest.is_empty() || rest.starts_with('('))).then_some(name)
-}
-
-/// The name of a `[pure|public] callback name(...)...;` statement.
-fn parse_callback(stmt: &str) -> Option<String> {
-    let mut s = stmt.trim();
-    while let Some(rest) = s
-        .strip_prefix("pure ")
-        .or_else(|| s.strip_prefix("public "))
-        .or_else(|| s.strip_prefix("private "))
-    {
-        s = rest.trim_start();
-    }
-    let rest = s.strip_prefix("callback ")?.trim();
-    let name: String = rest.chars().take_while(|c| is_ident_char(*c)).collect();
-    (!name.is_empty()).then_some(name)
-}
-
-/// The value of `property: value` when the statement sets `property`.
-fn property_value<'a>(stmt: &'a str, property: &str) -> Option<&'a str> {
-    let rest = stmt.trim().strip_prefix(property)?.trim_start();
-    rest.strip_prefix(':').map(str::trim)
-}
-
 /// What an element block collects while it is open.
 #[derive(Default, Clone)]
 struct ElementFrame {
@@ -308,7 +259,15 @@ enum Frame {
 /// Per-file scan state.
 struct FileScan<'a> {
     file: &'a str,
-    strings_by_line: BTreeMap<usize, Vec<&'a str>>,
+    /// Every string literal of the file, in source order.
+    strings: Vec<&'a str>,
+    /// Index into `strings` of the first literal of the statement being handled. Counted by the
+    /// quote pairs of the masked statements, so a one-line element with several literals (for
+    /// example, in Indicatrix, `placeholder-text: "Vol/W"; accessible-label: "Printed Volume"`)
+    /// gives each property its own literal.
+    current_string: usize,
+    /// The configured extra label property names.
+    props: &'a LabelProps,
     stack: Vec<Frame>,
     inventory: &'a mut Inventory,
     /// `None` in pass 1 (collecting roots and inner elements), the interactive types in pass 2.
@@ -365,10 +324,7 @@ impl FileScan<'_> {
         let frame = match (parent_holds_elements, element_type(text)) {
             (true, Some(ty)) => Frame::Element(ElementFrame {
                 ty,
-                id: text
-                    .split_once(":=")
-                    .map(|(id, _)| id.trim().to_owned())
-                    .filter(|id| !id.is_empty()),
+                id: element_id(text),
                 line: ev.line,
                 ..ElementFrame::default()
             }),
@@ -379,9 +335,13 @@ impl FileScan<'_> {
 
     fn statement(&mut self, ev: &Event) {
         let text = ev.text.trim();
-        let label = LABEL_PROPS.iter().find_map(|name| {
-            property_value(text, name).map(|v| ((*name).to_owned(), self.label_of(v, ev.line)))
-        });
+        let label = LABEL_PROPS
+            .iter()
+            .copied()
+            .chain(self.props.names())
+            .find_map(|name| {
+                property_value(text, name).map(|v| (name.to_owned(), self.label_of(v)))
+            });
         match self.stack.last_mut() {
             Some(Frame::Global { name }) => {
                 if let Some(callback) = parse_callback(text) {
@@ -405,8 +365,9 @@ impl FileScan<'_> {
         }
     }
 
-    /// Classifies the right-hand side of `accessible-label:` (masked text) on `line`.
-    fn label_of(&self, masked_value: &str, line: usize) -> Label {
+    /// Classifies the right-hand side of a label property (masked text) of the statement being
+    /// handled.
+    fn label_of(&self, masked_value: &str) -> Label {
         let compact: String = masked_value
             .chars()
             .filter(|c| !c.is_whitespace())
@@ -421,9 +382,8 @@ impl FileScan<'_> {
             && inner[1..inner.len() - 1].is_empty();
         if blank_literal {
             let text = self
-                .strings_by_line
-                .get(&line)
-                .and_then(|strings| strings.first())
+                .strings
+                .get(self.current_string)
                 .copied()
                 .unwrap_or_default();
             Label::Literal(text.to_owned())
@@ -530,11 +490,27 @@ impl FileScan<'_> {
                     .find_map(|p| element.props.get(*p))
                     .cloned()
             } else {
-                element.props.get("accessible-label").cloned().or_else(|| {
-                    info.prop
-                        .as_ref()
-                        .and_then(|prop| element.props.get(prop).cloned())
-                })
+                // A literal under a configured reader property is what the running element
+                // reports (for example, in Indicatrix, the wrapper's label is `reader_label`
+                // when set, else `text`), so it wins over the text.
+                element
+                    .props
+                    .get("accessible-label")
+                    .cloned()
+                    .or_else(|| {
+                        self.props.reader.iter().find_map(|name| {
+                            element
+                                .props
+                                .get(name.as_str())
+                                .filter(|label| matches!(label, Label::Literal(_)))
+                                .cloned()
+                        })
+                    })
+                    .or_else(|| {
+                        info.prop
+                            .as_ref()
+                            .and_then(|prop| element.props.get(prop).cloned())
+                    })
             };
             (
                 info.role.clone(),
@@ -562,25 +538,31 @@ impl FileScan<'_> {
 }
 
 /// Feeds one `.slint` file into `inventory`.
-fn scan_file(file: &str, source: &str, inventory: &mut Inventory, table: Option<&TypeTable>) {
+fn scan_file(
+    file: &str,
+    source: &str,
+    inventory: &mut Inventory,
+    table: Option<&TypeTable>,
+    props: &LabelProps,
+) {
     let scanned = scan(source);
-    let mut strings_by_line: BTreeMap<usize, Vec<&str>> = BTreeMap::new();
-    for string in &scanned.strings {
-        strings_by_line
-            .entry(string.line)
-            .or_default()
-            .push(string.text.as_str());
-    }
+    let strings: Vec<&str> = scanned.strings.iter().map(|s| s.text.as_str()).collect();
     let mut state = FileScan {
         file,
-        strings_by_line,
+        strings,
+        current_string: 0,
+        props,
         stack: Vec::new(),
         inventory,
         table,
         declared: Vec::new(),
         bodies: BTreeSet::new(),
     };
+    let mut consumed = 0_usize;
     for ev in events(&scanned.masked) {
+        state.current_string = consumed;
+        // The masked statement keeps only the two quotes of each literal.
+        consumed += ev.text.matches('"').count() / 2;
         match ev.kind {
             Kind::Open => state.open(&ev),
             Kind::Close => state.close(),
@@ -715,7 +697,7 @@ fn type_table(pass1: &Inventory) -> TypeTable {
 /// Reads `root/**/*.slint` (files sorted by path; `file` fields are relative to `root` with `/`
 /// separators). A missing or empty `root` yields an empty inventory: the caller reports it.
 #[must_use]
-pub fn load_inventory(root: &Path) -> Inventory {
+pub(super) fn load_inventory(root: &Path, props: &LabelProps) -> Inventory {
     let mut paths = Vec::new();
     collect_slint(root, &mut paths);
     let files: Vec<(String, String)> = paths
@@ -731,19 +713,34 @@ pub fn load_inventory(root: &Path) -> Inventory {
         .collect();
     let mut pass1 = Inventory::default();
     for (rel, text) in &files {
-        scan_file(rel, text, &mut pass1, None);
+        scan_file(rel, text, &mut pass1, None, props);
     }
     let table = type_table(&pass1);
     let mut inventory = Inventory::default();
     for (rel, text) in &files {
-        scan_file(rel, text, &mut inventory, Some(&table));
+        scan_file(rel, text, &mut inventory, Some(&table), props);
     }
+    // Pass 1 records the components; the single-site base credit reads them from the result.
+    inventory.components = pass1.components;
+    inventory
+}
+
+/// The inventory of one source text (the unit tests of this crate use it; two passes like
+/// [`load_inventory`]).
+#[cfg(test)]
+pub(super) fn inventory_of(file: &str, source: &str, props: &LabelProps) -> Inventory {
+    let mut pass1 = Inventory::default();
+    scan_file(file, source, &mut pass1, None, props);
+    let table = type_table(&pass1);
+    let mut inventory = Inventory::default();
+    scan_file(file, source, &mut inventory, Some(&table), props);
+    inventory.components = pass1.components;
     inventory
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Inventory, Label, scan_file, type_table};
+    use super::{Inventory, Label, LabelProps, scan_file, type_table};
 
     const SAMPLE: &str = r#"
 export global Demo {
@@ -761,10 +758,11 @@ export component Page inherits Window {
     #[test]
     fn callbacks_without_a_slint_body_and_interactive_elements_are_inventoried() {
         let mut pass1 = Inventory::default();
-        scan_file("sample.slint", SAMPLE, &mut pass1, None);
+        let props = LabelProps::default();
+        scan_file("sample.slint", SAMPLE, &mut pass1, None, &props);
         let table = type_table(&pass1);
         let mut inv = Inventory::default();
-        scan_file("sample.slint", SAMPLE, &mut inv, Some(&table));
+        scan_file("sample.slint", SAMPLE, &mut inv, Some(&table), &props);
         let keys: Vec<&str> = inv.callbacks.iter().map(|c| c.key.as_str()).collect();
         assert_eq!(keys, ["Demo.handled", "Demo.orphan"]);
         assert_eq!(inv.elements.len(), 2);
