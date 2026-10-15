@@ -1,6 +1,6 @@
 [package]
 name = "slint-harness"
-version = "0.18.3"
+version = "0.18.5"
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
@@ -17,6 +17,13 @@ slint-harness-hooks = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 toml = { workspace = true }
+png = { workspace = true, optional = true }
+
+[features]
+# Window screenshots: `Harness::renderer(Renderer::Software)` draws the windows with Slint's
+# software renderer and the `screenshot` module captures, crops and saves them as PNG. Off by
+# default: the mock renderer is faster and machine independent.
+screenshots = ["dep:png", "i-slint-backend-testing/renderer-software"]
 
 # Every self-test is its own process: the testing backend can be initialised once per process,
 # and the harness owns `main` (panic hook, exit code). `cargo test` runs each with exit code 0
@@ -84,6 +91,11 @@ harness = false
 [[test]]
 name = "coverage_matching"
 harness = false
+
+[[test]]
+name = "screenshots"
+harness = false
+required-features = ["screenshots"]
 
 [lints]
 workspace = true

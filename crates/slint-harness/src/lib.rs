@@ -61,6 +61,8 @@
 //! * [`hooks`]: the app-side seams (the `slint-harness-hooks` crate): file dialogs, clipboard,
 //!   opener, data directory.
 //! * [`backend`]: pumping mock time and waiting on the app.
+//! * [`timing`]: where a run spends its real time (per-scenario samples, console line, report
+//!   section).
 //!
 //! The README (the crates.io page and the repository root) is the setup guide: the quick-start
 //! checklist, every hook, the coverage gate, troubleshooting, and the `examples/counter` and
@@ -79,7 +81,11 @@ mod render;
 pub mod report;
 mod runner;
 mod scene;
+#[cfg(feature = "screenshots")]
+pub mod screenshot;
 pub mod smoke;
+pub mod timing;
+mod timing_report;
 pub mod view;
 
 pub use ctx::{Attached, Ctx, Hooks};
@@ -101,7 +107,7 @@ pub mod prelude {
     pub use crate::{
         AccessibleRole, Attached, Ctx, ElementHandle, ElementRoot, Harness, Hooks, Jobs,
         SLINT_VERSION,
-        backend::{pump, settle, wait_until},
+        backend::{Renderer, pump, settle, wait_until, wait_until_labeled},
         checks::SweepOptions,
         coverage::{
             Coverage, GateRule, arm_gate, record_callback, record_site_id, record_wrappers,
@@ -109,6 +115,7 @@ pub mod prelude {
         profile::{Profile, ProfileDir},
         report::{Finding, Format, Report},
         smoke::{DEFAULT_DENY, DenyField, DenyMatch, DenyRule, Smoke, SmokeStats},
+        timing,
         view::{Control, WindowView},
     };
     pub use std::process::ExitCode;

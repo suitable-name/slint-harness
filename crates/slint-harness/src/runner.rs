@@ -21,7 +21,7 @@ pub(crate) use jobs::Plan;
 
 use crate::{
     Ctx,
-    backend::init_backend,
+    backend::{Renderer, init_backend_with},
     checks::SweepOptions,
     coverage::Coverage,
     panics::install_panic_recorder,
@@ -63,6 +63,7 @@ pub(crate) fn run_scenario(
     env: &StepEnv<'_>,
 ) -> Option<String> {
     report.begin_scenario(name);
+    crate::timing::reset();
     let _ = take_panics();
     crate::hooks::picker::clear();
     let outcome = {
@@ -90,6 +91,7 @@ pub(crate) fn run_scenario(
         ));
     }
     report.end_scenario(name);
+    report.attach_timing(crate::timing::take());
     crate::profile::take_abort_request()
 }
 
@@ -119,6 +121,8 @@ pub struct Harness {
     pub(crate) coverage: Option<Coverage>,
     pub(crate) sweep_options: SweepOptions,
     pub(crate) scenarios: Vec<(String, ScenarioFn)>,
+    /// The scenarios of [`Harness::scenario_last`]: they run after every ordinary one.
+    pub(crate) last_scenarios: Vec<(String, ScenarioFn)>,
     /// Runs after the last scenario and the coverage gate, before the profile is deleted.
     pub(crate) teardown: Option<Box<dyn FnOnce()>>,
     /// The test crate's `CARGO_MANIFEST_DIR` (run-time variable, set by `cargo test`), read
@@ -128,6 +132,8 @@ pub struct Harness {
     pub(crate) jobs: Jobs,
     /// The worker cap; `None` is the machine's parallelism.
     pub(crate) max_jobs: Option<usize>,
+    /// What draws the windows (default: the mock renderer, nothing is drawn).
+    pub(crate) renderer: Renderer,
 }
 
 impl Harness {
@@ -154,10 +160,12 @@ impl Harness {
             coverage: None,
             sweep_options: SweepOptions::default(),
             scenarios: Vec::new(),
+            last_scenarios: Vec::new(),
             teardown: None,
             manifest_dir,
             jobs: Jobs::Serial,
             max_jobs: None,
+            renderer: Renderer::Mock,
         }
     }
 
@@ -175,6 +183,15 @@ impl Harness {
     #[must_use]
     pub fn max_jobs(mut self, max: usize) -> Self {
         self.max_jobs = Some(max.max(1));
+        self
+    }
+
+    /// What draws the windows: [`Renderer::Mock`] (the default) draws nothing; with the
+    /// `screenshots` feature, `Renderer::Software` draws real pixels for
+    /// `screenshot::capture`. Parallel workers use the same renderer.
+    #[must_use]
+    pub const fn renderer(mut self, renderer: Renderer) -> Self {
+        self.renderer = renderer;
         self
     }
 
@@ -246,6 +263,25 @@ impl Harness {
         self
     }
 
+    /// Adds a scenario that runs after every ordinary one (those added with
+    /// [`Harness::scenario`]), whatever the order of the calls; several run in the order added.
+    /// The scenario filters apply to it as to any other.
+    ///
+    /// The place for a pass that completes the coverage of the others: in a parallel run it is
+    /// dispatched only when all ordinary scenarios are done, and the coordinator hands it the
+    /// union of the coverage recorders of every worker, so `coverage::recorded_callbacks()`
+    /// shows what the whole run did, not only what its own worker did. Several last scenarios
+    /// run in parallel with each other.
+    #[must_use]
+    pub fn scenario_last(
+        mut self,
+        name: impl Into<String>,
+        run: impl FnMut(&mut Ctx<'_>) -> Result<(), Finding> + 'static,
+    ) -> Self {
+        self.last_scenarios.push((name.into(), Box::new(run)));
+        self
+    }
+
     /// Runs everything and returns the exit code: 0 clean (or `SLINT_HARNESS_ALLOW_FAIL`),
     /// 1 findings, 2 aborted (isolation could not be proven, no debug info). A harness with no
     /// scenarios at all is a `config` finding (exit code 1).
@@ -280,11 +316,17 @@ impl Harness {
             coverage,
             sweep_options,
             mut scenarios,
+            last_scenarios,
             mut teardown,
             manifest_dir,
             jobs,
             max_jobs,
+            renderer,
         } = self;
+        // One list, ordinary scenarios first: the index of a scenario is the same in every
+        // process, and everything from `ordinary` on is a "last" scenario.
+        let ordinary = scenarios.len();
+        scenarios.extend(last_scenarios);
         let (env_filters, arg_filters) = scenario_filters();
         let filters: Vec<String> = env_filters.iter().chain(&arg_filters).cloned().collect();
         let selected = scenarios
@@ -312,6 +354,7 @@ impl Harness {
                 sweep_options,
                 scenarios,
                 teardown,
+                renderer,
             });
         }
         print_banner(selected, scenarios.len(), &report_dir);
@@ -343,6 +386,7 @@ impl Harness {
                 plan,
                 names,
                 chosen,
+                ordinary,
                 coverage,
                 manifest_dir,
                 filtered: !filters.is_empty(),
@@ -352,7 +396,7 @@ impl Harness {
         let profile = profile.unwrap_or_else(Profile::isolated).create();
         // 2. Testing backend, then the panic recorder (so a platform panic is not recorded as
         // an app panic).
-        if let Err(message) = init_backend() {
+        if let Err(message) = init_backend_with(renderer) {
             profile.finish();
             crate::profile::abort_run(&message);
         }

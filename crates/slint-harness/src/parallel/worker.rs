@@ -10,12 +10,13 @@
 
 use super::send_message;
 use crate::{
-    backend::init_backend,
+    backend::{Renderer, init_backend_with},
     checks::SweepOptions,
     panics::install_panic_recorder,
     profile::Profile,
     report::{Finding, Report},
     runner::{ScenarioFn, StepEnv, resolve_seed, resolve_sizes, run_scenario},
+    timing::Table,
 };
 use serde_json::{Value, json};
 use std::{
@@ -31,6 +32,7 @@ pub(crate) struct WorkerSetup {
     pub(crate) sweep_options: SweepOptions,
     pub(crate) scenarios: Vec<(String, ScenarioFn)>,
     pub(crate) teardown: Option<Box<dyn FnOnce()>>,
+    pub(crate) renderer: Renderer,
 }
 
 /// How one command ended.
@@ -51,9 +53,10 @@ pub(crate) fn run_worker(setup: WorkerSetup) -> ! {
         sweep_options,
         mut scenarios,
         mut teardown,
+        renderer,
     } = setup;
     let profile = profile.unwrap_or_else(Profile::isolated).create();
-    if let Err(message) = init_backend() {
+    if let Err(message) = init_backend_with(renderer) {
         send_message(&json!({ "abort": message }));
         profile.finish();
         std::process::exit(2);
@@ -79,6 +82,10 @@ pub(crate) fn run_worker(setup: WorkerSetup) -> ! {
         else {
             continue;
         };
+        // A "last" scenario comes with the union of every worker's coverage recorder.
+        if let Some(union) = command.get("coverage") {
+            crate::coverage::recorder::merge_snapshot(union);
+        }
         let name = command
             .get("name")
             .and_then(Value::as_str)
@@ -142,8 +149,9 @@ fn run_one(
     Step::Done(done_message(index, &report))
 }
 
-/// The `done` message: the scenario's distinct findings with repeat counts, its notes, wall time
-/// and the number of findings it made.
+/// The `done` message: the scenario's distinct findings with repeat counts, its notes, wall time,
+/// the number of findings it made, its timing samples and the worker's coverage recorder so far
+/// (the coordinator unions the recorders to hand them to the "last" scenarios).
 fn done_message(index: usize, report: &Report) -> Value {
     let findings: Vec<Value> = report
         .findings
@@ -163,11 +171,17 @@ fn done_message(index: usize, report: &Report) -> Value {
         .scenarios
         .last()
         .map_or((report.findings.len(), 0), |s| (s.findings, s.duration_ms));
+    let timing = report
+        .scenarios
+        .last()
+        .map_or_else(|| Table::new().to_json(), |s| s.timing.to_json());
     json!({
         "done": index,
         "findings": findings,
         "notes": report.notes,
         "duration_ms": duration_ms,
         "made": made,
+        "timing": timing,
+        "recorder": crate::coverage::recorder::snapshot(),
     })
 }

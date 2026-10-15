@@ -248,7 +248,7 @@ no report (README, Troubleshooting).
 
 ```text
 $ SLINT_HARNESS_FILTER=open,save cargo test --features ui-harness --test ui
-slint-harness 0.18.3 (Slint 1.18.1): 2 of 7 scenario(s) selected, report dir target/slint-harness/my-app
+slint-harness 0.18.5 (Slint 1.18.1): 2 of 7 scenario(s) selected, report dir target/slint-harness/my-app
 ```
 
 ## Speed up a long suite
@@ -280,6 +280,35 @@ The report is the same as a serial run's (plus one note naming the workers used)
 console prints each scenario's output in scenario order. Every worker re-runs `main`, so `main`
 must build the same harnesses in the same order and do nothing before `Harness::new()` that must
 not run twice (README, Parallel runs).
+
+## Finding where a slow run spends its time
+
+A run that takes hours with almost no CPU or memory is waiting. Every scenario prints a `timing:`
+line under its `-> N finding(s), M ms` line, and the report has a "Timing" section; the labels
+`wait`, `settle` and `pump` come from the backend:
+
+```text
+slint-harness:   -> 0 finding(s), 839000 ms
+slint-harness:   timing: wait 790.0 s (4120x, 38 timed out 380.0 s), settle 20.1 s (900x)
+```
+
+Many timed-out waits mean a condition that never becomes true (a handle that is never released, a
+window that never closes), and each one costs its full timeout. Give the suspicious waits their
+own label and run again:
+
+```rust
+let released = wait_until_labeled("db-release", Duration::from_secs(10), || db_free());
+let app = timing::time("relaunch", || launch_again(ctx));
+timing::record("profile-delete", started.elapsed());
+```
+
+Read the section in `report.md`: the slowest scenarios with their three biggest labels show which
+scenario to open first, the totals show which label to fix across the suite, and the timeouts per
+label show how much of the run was spent giving up. For a parallel run the last paragraph gives
+the workers and the utilisation; a low value with a few huge scenarios means the wall time is
+bounded by those scenarios, not by the worker count, so split them. Work that must see the
+coverage of the others belongs in `Harness::scenario_last`, which runs when the ordinary
+scenarios are done and, in a parallel run, receives every worker's coverage.
 
 ## Guarded paths for apps that use the dirs crate
 

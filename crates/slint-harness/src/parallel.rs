@@ -11,10 +11,16 @@
 //! Protocol: one JSON message per line. Coordinator to worker on stdin: `{"run": <scenario
 //! index>, "name": "<name>"}` or `{"quit": true}` (stdin EOF also means quit). Worker to
 //! coordinator on stdout: lines holding the marker `MARKER` followed by JSON (`ready`, `done`,
-//! `bye`, `abort`); every other line is console output that the coordinator replays. Before each
+//! `bye`, `abort`; `done` carries the scenario's `timing` table and the worker's coverage
+//! `recorder` snapshot, which the coordinator unions); every other line is console output that the coordinator replays. Before each
 //! marker line the worker writes a newline, so app output without a trailing newline cannot
 //! swallow the marker; the coordinator drops that separator again and finds the marker anywhere
 //! in a line.
+//!
+//! "Last" scenarios (`Harness::scenario_last`) are queued apart and handed out only when every
+//! ordinary scenario has a result; their `run` command also carries `"coverage"`, the union of
+//! the recorders received so far, which the worker merges before running. A worker with nothing
+//! to do meanwhile waits instead of quitting.
 //!
 //! The run index (`SLINT_HARNESS_WORKER`) tells a worker which `run_to_report` call of the
 //! re-executed `main` is the parallel one.
@@ -26,8 +32,9 @@ pub(crate) use worker::{WorkerSetup, run_worker};
 use crate::{
     coverage::Coverage,
     cpu::CpuSampler,
-    report::{Finding, Report, ScenarioRecord},
+    report::{Finding, ParallelStats, Report, ScenarioRecord},
     runner::Plan,
+    timing::Table,
 };
 use serde_json::{Value, json};
 use std::{
@@ -90,6 +97,9 @@ pub(crate) struct CoordinatorSetup {
     pub(crate) names: Vec<String>,
     /// Indices into `names` of the selected scenarios.
     pub(crate) chosen: Vec<usize>,
+    /// How many of `names` are ordinary scenarios; the rest (from this index on) are the
+    /// "last" scenarios, dispatched only when every ordinary one is done.
+    pub(crate) ordinary: usize,
     pub(crate) coverage: Option<Coverage>,
     pub(crate) manifest_dir: PathBuf,
     /// Whether a scenario filter is active.
@@ -102,12 +112,15 @@ struct Outcome {
     notes: Vec<String>,
     duration_ms: u64,
     made: usize,
+    timing: Table,
 }
 
 /// One selected scenario: its buffered console output and, once known, its result.
 struct Slot {
     index: usize,
     name: String,
+    /// A `scenario_last` scenario.
+    last: bool,
     began: Option<Instant>,
     lines: Vec<(bool, String)>,
     result: Option<Outcome>,
@@ -146,7 +159,13 @@ struct Coordinator {
     rx: Receiver<Event>,
     workers: Vec<Worker>,
     slots: Vec<Slot>,
+    /// Ordinary scenarios not yet handed to a worker.
     queue: VecDeque<usize>,
+    /// "Last" scenarios not yet handed out; they wait for `ordinary_pending` to reach 0.
+    last_queue: VecDeque<usize>,
+    /// Ordinary scenarios without a result yet (queued or running).
+    ordinary_pending: usize,
+    started_at: Instant,
     next_print: usize,
     report: Report,
     started: usize,
@@ -167,6 +186,7 @@ pub(crate) fn coordinate(setup: CoordinatorSetup) -> Report {
         plan,
         names,
         chosen,
+        ordinary,
         coverage,
         manifest_dir,
         filtered,
@@ -182,12 +202,15 @@ pub(crate) fn coordinate(setup: CoordinatorSetup) -> Report {
         .map(|&index| Slot {
             index,
             name: names[index].clone(),
+            last: index >= ordinary,
             began: None,
             lines: Vec::new(),
             result: None,
         })
         .collect();
-    let queue = (0..slots.len()).collect();
+    let queue: VecDeque<usize> = (0..slots.len()).filter(|&i| !slots[i].last).collect();
+    let last_queue: VecDeque<usize> = (0..slots.len()).filter(|&i| slots[i].last).collect();
+    let ordinary_pending = queue.len();
     let mut coordinator = Coordinator {
         run_index,
         plan,
@@ -196,6 +219,9 @@ pub(crate) fn coordinate(setup: CoordinatorSetup) -> Report {
         workers: Vec::new(),
         slots,
         queue,
+        last_queue,
+        ordinary_pending,
+        started_at: Instant::now(),
         next_print: 0,
         report,
         started: 0,
@@ -296,11 +322,34 @@ impl Coordinator {
         if self.abort.is_some() || !unfinished || self.workers.iter().any(|w| !w.exited) {
             return;
         }
-        if self.queue.is_empty() {
+        if self.queue.is_empty() && self.last_queue.is_empty() {
             self.begin_abort("every worker exited with scenarios unfinished".to_owned());
         } else {
             self.start_worker();
         }
+    }
+
+    /// Scenarios a worker could start right now: the ordinary queue, plus the "last" queue once
+    /// every ordinary scenario has a result.
+    fn dispatchable(&self) -> usize {
+        let last = if self.ordinary_pending == 0 {
+            self.last_queue.len()
+        } else {
+            0
+        };
+        self.queue.len() + last
+    }
+
+    /// The next scenario for a free worker: an ordinary one, else a "last" one when no ordinary
+    /// scenario is still running or queued.
+    fn next_slot(&mut self) -> Option<usize> {
+        if let Some(slot) = self.queue.pop_front() {
+            return Some(slot);
+        }
+        if self.ordinary_pending == 0 {
+            return self.last_queue.pop_front();
+        }
+        None
     }
 
     fn grow_if_due(&mut self) {
@@ -309,7 +358,7 @@ impl Coordinator {
         }
         self.last_check = Instant::now();
         let idle = self.sampler.as_mut().and_then(CpuSampler::idle_cores);
-        if should_grow(idle, self.live(), self.plan.cap, self.queue.len()) {
+        if should_grow(idle, self.live(), self.plan.cap, self.dispatchable()) {
             self.target = self.live() + 1;
             self.start_worker();
         }
@@ -317,7 +366,7 @@ impl Coordinator {
 
     /// Starts a replacement worker when scenarios are queued and fewer workers live than wanted.
     fn replace_if_needed(&mut self) {
-        if self.abort.is_none() && !self.queue.is_empty() && self.live() < self.target {
+        if self.abort.is_none() && self.dispatchable() > 0 && self.live() < self.target {
             self.start_worker();
         }
     }
@@ -364,9 +413,12 @@ impl Coordinator {
             self.early_deaths = 0;
             self.dispatch(w);
         } else if message.get("done").is_some() {
+            // The worker's recorder so far goes into the union the "last" scenarios receive.
+            if let Some(recorder) = message.get("recorder") {
+                crate::coverage::recorder::merge_snapshot(recorder);
+            }
             if let Some(slot) = self.workers[w].current.take() {
-                self.slots[slot].result = Some(parse_outcome(message));
-                self.flush_ready();
+                self.set_result(slot, parse_outcome(message));
             }
             self.dispatch(w);
         } else if message.get("bye").is_some() {
@@ -383,22 +435,53 @@ impl Coordinator {
         }
     }
 
-    /// Gives worker `w` the next queued scenario, or tells it to quit when none is left.
+    /// Stores the result of `slot`, prints what is ready, and, when that was the last ordinary
+    /// scenario, wakes the idle workers for the "last" ones.
+    fn set_result(&mut self, slot: usize, outcome: Outcome) {
+        self.slots[slot].result = Some(outcome);
+        if !self.slots[slot].last {
+            self.ordinary_pending = self.ordinary_pending.saturating_sub(1);
+        }
+        self.flush_ready();
+        if self.ordinary_pending == 0 && !self.last_queue.is_empty() {
+            for w in 0..self.workers.len() {
+                let worker = &self.workers[w];
+                if worker.ready && worker.current.is_none() {
+                    self.dispatch(w);
+                }
+            }
+        }
+    }
+
+    /// Gives worker `w` the next scenario. With none to give it waits (a "last" scenario is
+    /// queued behind ordinary ones still running) or is told to quit (nothing is left).
     fn dispatch(&mut self, w: usize) {
-        if self.workers[w].exited || self.workers[w].quit_sent {
+        if self.workers[w].exited || self.workers[w].quit_sent || self.workers[w].current.is_some()
+        {
             return;
         }
-        if self.abort.is_none()
-            && let Some(slot) = self.queue.pop_front()
-        {
-            let message = json!({ "run": self.slots[slot].index, "name": self.slots[slot].name });
-            self.workers[w].current = Some(slot);
-            self.slots[slot].began = Some(Instant::now());
-            if !self.send(w, &message) {
-                self.workers[w].current = None;
-                self.queue.push_front(slot);
+        if self.abort.is_none() {
+            if let Some(slot) = self.next_slot() {
+                let mut message =
+                    json!({ "run": self.slots[slot].index, "name": self.slots[slot].name });
+                if self.slots[slot].last {
+                    message["coverage"] = crate::coverage::recorder::snapshot();
+                }
+                self.workers[w].current = Some(slot);
+                self.slots[slot].began = Some(Instant::now());
+                if !self.send(w, &message) {
+                    self.workers[w].current = None;
+                    if self.slots[slot].last {
+                        self.last_queue.push_front(slot);
+                    } else {
+                        self.queue.push_front(slot);
+                    }
+                }
+                return;
             }
-            return;
+            if self.ordinary_pending > 0 && !self.last_queue.is_empty() {
+                return;
+            }
         }
         self.quit(w);
     }
@@ -429,6 +512,7 @@ impl Coordinator {
         }
         self.abort = Some(message);
         self.queue.clear();
+        self.last_queue.clear();
         for w in 0..self.workers.len() {
             if !self.workers[w].exited && !self.workers[w].aborted {
                 self.quit(w);
@@ -485,13 +569,16 @@ impl Coordinator {
             "{name}: worker exited with {status} during the scenario; its last output lines: \
              {tail}; its profile directory may have been left behind in the temp dir"
         );
-        self.slots[slot].result = Some(Outcome {
-            findings: vec![(Finding::simple("worker-crash", detail), 1)],
-            notes: Vec::new(),
-            duration_ms,
-            made: 1,
-        });
-        self.flush_ready();
+        self.set_result(
+            slot,
+            Outcome {
+                findings: vec![(Finding::simple("worker-crash", detail), 1)],
+                notes: Vec::new(),
+                duration_ms,
+                made: 1,
+                timing: Table::new(),
+            },
+        );
     }
 
     /// Prints and merges every finished scenario whose predecessors are all printed.
@@ -524,6 +611,11 @@ impl Coordinator {
             "parallel run: {} worker(s) used, peak {} at once",
             self.started, self.peak
         ));
+        self.report.parallel = Some(ParallelStats {
+            started: self.started,
+            peak: self.peak,
+            wall_ms: u64::try_from(self.started_at.elapsed().as_millis()).unwrap_or(u64::MAX),
+        });
         if let Some(coverage) = coverage {
             self.report.set_context("coverage");
             crate::coverage::finish(coverage, manifest_dir, filtered, &mut self.report);
@@ -558,6 +650,7 @@ fn merge(report: &mut Report, name: &str, outcome: Outcome) {
         name: name.to_owned(),
         findings: outcome.made,
         duration_ms: outcome.duration_ms,
+        timing: outcome.timing,
     });
 }
 
@@ -603,6 +696,7 @@ fn parse_outcome(message: &Value) -> Outcome {
         made: number(message, "made")
             .and_then(|n| usize::try_from(n).ok())
             .unwrap_or(0),
+        timing: Table::from_json(message.get("timing")),
     }
 }
 
@@ -678,8 +772,14 @@ mod tests {
             "notes": ["n"],
             "duration_ms": 12,
             "made": 1,
+            "timing": {"wait": {"count": 2, "total_us": 5, "timeouts": 1, "timeout_us": 3}},
         });
         let outcome = parse_outcome(&message);
+        let wait = outcome.timing.get("wait").copied().unwrap_or_default();
+        assert_eq!(
+            (wait.count, wait.total_us, wait.timeouts, wait.timeout_us),
+            (2, 5, 1, 3)
+        );
         assert_eq!(outcome.findings.len(), 1);
         let (finding, times) = &outcome.findings[0];
         assert_eq!(

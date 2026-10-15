@@ -16,6 +16,9 @@
 //! - `crash` (`Fixed(2)`, one scenario calls `std::process::abort`): exit code 1, exactly one
 //!   `worker-crash` finding that names the scenario, every other scenario's result present.
 //! - `env` (`SLINT_HARNESS_JOBS=bogus`): a `config` finding, a serial run, exit code 1.
+//! - `last-serial` and `last-fixed2` (`Jobs::Fixed(2)`): a `scenario_last` registered before the
+//!   ordinary scenarios runs after them and sees the callbacks both recorded, one of them in
+//!   the other worker; the timing statistics are in `report.json` and `report.md`.
 //!
 //! The fixture text below must match `tests/fixtures/parallel/ui/app.slint`, which the coverage
 //! gate scans (relative to `CARGO_MANIFEST_DIR`). Run this test WITHOUT a scenario filter. The
@@ -24,7 +27,7 @@
 use serde_json::Value;
 use slint::ComponentHandle;
 use slint_harness::{prelude::*, profile::request_abort};
-use std::{fs, path::PathBuf, process::Command};
+use std::{fs, path::PathBuf, process::Command, time::Duration};
 
 slint::slint! {
     import { Button } from "std-widgets.slint";
@@ -146,6 +149,36 @@ fn small(mode: &str, jobs: Jobs, kind: Kind) -> Harness {
         .scenario("four", |_ctx| Ok(()))
 }
 
+/// Two ordinary scenarios that record a callback each (`a` also sleeps, so with two workers the
+/// two run in different workers) and a `scenario_last` registered FIRST that must still run
+/// last and must see both callbacks, one of which was recorded in another worker.
+fn lasting(mode: &str, jobs: Jobs) -> Harness {
+    Harness::new()
+        .report_dir(report_dir_for(mode))
+        .jobs(jobs)
+        .scenario_last("z last", |ctx| {
+            let seen = slint_harness::coverage::recorded_callbacks();
+            for key in ["Last.a", "Last.b"] {
+                ctx.expect(
+                    seen.contains(key),
+                    "last-coverage",
+                    format!("{key} is not recorded when the last scenario runs; saw {seen:?}"),
+                );
+            }
+            Ok(())
+        })
+        .scenario("a", |_ctx| {
+            record_callback("Last.a");
+            timing::record("selftest", Duration::from_millis(5));
+            std::thread::sleep(Duration::from_millis(600));
+            Ok(())
+        })
+        .scenario("b", |_ctx| {
+            record_callback("Last.b");
+            Ok(())
+        })
+}
+
 fn main() -> ExitCode {
     match std::env::var(CHILD_FLAG).ok().as_deref() {
         Some(mode) => child(mode),
@@ -162,6 +195,8 @@ fn child(mode: &str) -> ExitCode {
         "abort" => small(mode, Jobs::Fixed(2), Kind::Abort).run(),
         "crash" => small(mode, Jobs::Fixed(2), Kind::Crash).run(),
         "env" => small(mode, Jobs::Serial, Kind::Plain).run(),
+        "last-serial" => lasting(mode, Jobs::Serial).run(),
+        "last-fixed2" => lasting(mode, Jobs::Fixed(2)).run(),
         _ => ExitCode::FAILURE,
     }
 }
@@ -437,9 +472,57 @@ fn env_checks(mismatches: &mut Vec<String>) {
     }
 }
 
+/// `scenario_last` runs after the ordinary scenarios (serial and in two workers), sees the
+/// coverage the other worker recorded, and the timing statistics reach `report.json` and
+/// `report.md` (the scenario's own sample, a `timing` object, the parallel numbers).
+fn last_checks(mismatches: &mut Vec<String>) {
+    for (mode, parallel) in [("last-serial", false), ("last-fixed2", true)] {
+        clear_report(mode);
+        let result = run_child(mode, &[]);
+        expect_code(mode, &result, 0, mismatches);
+        let report = match load_report(mode) {
+            Ok(report) => report,
+            Err(e) => {
+                mismatches.push(e);
+                continue;
+            }
+        };
+        let want = vec![
+            ("a".to_owned(), 0),
+            ("b".to_owned(), 0),
+            ("z last".to_owned(), 0),
+        ];
+        let got = scenario_summary(&report);
+        if got != want {
+            mismatches.push(format!("{mode}: scenarios are {got:?}, wanted {want:?}"));
+        }
+        if report["findings"].as_array().map_or(1, Vec::len) != 0 {
+            mismatches.push(format!("{mode}: findings: {}", report["findings"]));
+        }
+        let sample = &report["scenarios"][0]["timing"]["selftest"];
+        if sample["count"].as_u64() != Some(1) || sample["total_ms"].as_u64() != Some(5) {
+            mismatches.push(format!(
+                "{mode}: scenario a has no selftest sample: {sample}"
+            ));
+        }
+        if !report["timing"]["totals"]["selftest"].is_object() {
+            mismatches.push(format!("{mode}: no selftest total: {}", report["timing"]));
+        }
+        let stats = &report["timing"]["parallel"];
+        if parallel == stats.is_null() || (parallel && stats["peak_workers"].as_u64() < Some(1)) {
+            mismatches.push(format!("{mode}: parallel stats are {stats}"));
+        }
+        let markdown = fs::read_to_string(report_dir_for(mode).join("report.md"));
+        if !markdown.is_ok_and(|text| text.contains("## Timing\n") && text.contains("`selftest`")) {
+            mismatches.push(format!("{mode}: report.md has no Timing section"));
+        }
+    }
+}
+
 fn parent() -> ExitCode {
     let mut mismatches: Vec<String> = Vec::new();
     comparison_checks(&mut mismatches);
+    last_checks(&mut mismatches);
     abort_checks(&mut mismatches);
     crash_checks(&mut mismatches);
     env_checks(&mut mismatches);

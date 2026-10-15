@@ -7,6 +7,7 @@
 //! scenario records how many distinct findings it made and its wall time, so a slow scenario is
 //! visible in the report.
 
+use crate::timing::Table;
 use std::{
     collections::{BTreeMap, HashMap},
     fmt::Write as _,
@@ -105,11 +106,22 @@ impl Format {
     }
 }
 
-/// What one scenario cost: distinct findings made and wall time.
+/// What one scenario cost: distinct findings made, wall time and the timing samples.
 pub(crate) struct ScenarioRecord {
     pub(crate) name: String,
     pub(crate) findings: usize,
     pub(crate) duration_ms: u64,
+    pub(crate) timing: Table,
+}
+
+/// What the coordinator of a parallel run knows about the workers (for the Timing section).
+pub(crate) struct ParallelStats {
+    /// Worker processes started over the run (replacements included).
+    pub(crate) started: usize,
+    /// The most workers alive at once.
+    pub(crate) peak: usize,
+    /// Wall time of the scenario phase.
+    pub(crate) wall_ms: u64,
 }
 
 /// All findings, informational notes, sections and per-scenario timings of one harness run.
@@ -124,6 +136,8 @@ pub struct Report {
     pub(crate) current_scenario_start: usize,
     pub(crate) current_scenario_began: Option<Instant>,
     pub(crate) sections: Vec<(String, String)>,
+    /// Set by the coordinator of a parallel run.
+    pub(crate) parallel: Option<ParallelStats>,
 }
 
 impl Report {
@@ -142,6 +156,7 @@ impl Report {
             current_scenario_start: 0,
             current_scenario_began: None,
             sections: Vec::new(),
+            parallel: None,
         }
     }
 
@@ -191,7 +206,20 @@ impl Report {
             name: name.to_owned(),
             findings: made,
             duration_ms,
+            timing: Table::new(),
         });
+    }
+
+    /// Stores the timing samples of the scenario just ended with its record and prints the
+    /// `timing:` console line under the `-> N finding(s)` line (nothing is printed for an
+    /// empty table).
+    pub(crate) fn attach_timing(&mut self, table: Table) {
+        if let Some(text) = table.console_text() {
+            println!("slint-harness:   timing: {text}");
+        }
+        if let Some(record) = self.scenarios.last_mut() {
+            record.timing = table;
+        }
     }
 
     /// Adds one finding (merging exact repeats into a count).
@@ -295,6 +323,7 @@ impl Report {
             }
             out.push('\n');
         }
+        crate::timing_report::markdown(self, &mut out);
         for (title, body) in &self.sections {
             let _ = writeln!(out, "## {title}\n");
             out.push_str(body);
@@ -396,6 +425,7 @@ impl Report {
                     "name": s.name,
                     "findings": s.findings,
                     "duration_ms": s.duration_ms,
+                    "timing": s.timing.to_report_json(),
                 })
             })
             .collect();
@@ -409,6 +439,7 @@ impl Report {
             "slint": crate::SLINT_VERSION,
             "findings": findings,
             "scenarios": scenarios,
+            "timing": crate::timing_report::json(self),
             "per_check": self.per_check(),
             "notes": self.notes,
             "sections": sections,

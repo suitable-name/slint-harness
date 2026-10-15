@@ -43,7 +43,7 @@ the smallest app; `examples/notes` is the full one (see Examples).
    slint-build = "=1.18.1"
 
    [dev-dependencies]
-   slint-harness = "=0.18.3"
+   slint-harness = "=0.18.5"
 
    [[test]]
    name = "ui"
@@ -262,14 +262,50 @@ run wrote. The finding texts are the same in every format.
 
 ## Console output
 
-Every line starts with `slint-harness`. In order: the banner (`slint-harness 0.18.3 (Slint
+Every line starts with `slint-harness`. In order: the banner (`slint-harness 0.18.5 (Slint
 1.18.1): 7 of 7 scenario(s) selected, report dir ...`), the profile directory and the guarded
-paths, one `scenario <name>` line per scenario with its `-> N finding(s), M ms`, the smoke
-counters, the coverage counters, the report files written, then `PASS, no findings` or `FAIL,
+paths, one `scenario <name>` line per scenario with its `-> N finding(s), M ms` and a `timing:`
+line (see Timing), the smoke counters, the coverage counters, the report files written, then `PASS, no findings` or `FAIL,
 N finding(s):` with the per-check counts and up to 25 findings as `[window] check: element --
 detail (xN) [state]` (the rest: `... N more in <dir>`). Aborts go to stderr as
 `slint-harness: ABORT: <cause and what to change>`. No color, no cursor movement: the output
 reads the same in a CI log and in a screen reader.
+
+### Timing
+
+A run that takes hours with almost no CPU is waiting, and the report says on what. Under each
+scenario's `-> N finding(s), M ms` line the console prints the labels that took the most real
+time:
+
+```text
+slint-harness:   -> 0 finding(s), 51234 ms
+slint-harness:   timing: relaunch 31.2 s (45x), wait 12.0 s (210x, 3 timed out 9.0 s), settle 4.1 s (80x)
+```
+
+Each label is `<name> <total> (<samples>x[, <n> timed out <time>])`, sorted by total, at most six.
+The backend records three labels by itself: `wait` (every `wait_until`, `ctx.wait_for`; a call that
+gave up is a timeout sample), `settle` (`settle` is not also counted as `wait`) and `pump` (the
+real time a direct `pump` call spent draining events; the pumps inside a wait belong to the
+wait). Your own code adds more:
+
+```rust
+use slint_harness::prelude::*;
+
+timing::record("db-open", elapsed);                  // one sample
+timing::record_timeout("relaunch", elapsed);         // a sample that hit its timeout
+let app = timing::time("relaunch", || relaunch());   // times a closure
+wait_until_labeled("save-done", timeout, || saved()); // a wait with its own label
+```
+
+`report.json` stores the table per scenario (`scenarios[i].timing`: label to `count`,
+`total_ms`, `timeouts`, `timeout_ms`) and the run's totals plus, for a parallel run, the workers
+(`timing.totals`, `timing.parallel` with `workers_started`, `peak_workers`, `wall_ms`,
+`scenario_ms`, `utilisation_percent`). The report files get a "Timing" section: the 15 slowest
+scenarios by wall time with their three biggest labels, the time per label over the run, the
+timeouts per label and, for a parallel run, the workers used and the utilisation (the sum of the
+scenario times over peak workers times wall time). The tables are per scenario: samples are
+reset when a scenario begins and taken when it ends, so work done between scenarios (the
+teardown) is not counted.
 
 ## Parallel runs
 
@@ -305,6 +341,13 @@ per-check totals and the scenario list are identical to a serial run of the same
 extra note, `parallel run: <n> worker(s) used, peak <p> at once`. The coverage gate sees the
 union of what all workers reached.
 
+A scenario that needs that union itself (a pass that invokes the callbacks nothing else
+covered) is registered with `Harness::scenario_last`. It runs after every ordinary scenario; in a
+parallel run it is dispatched only when all ordinary scenarios are done (workers without work wait
+meanwhile) and receives the union of the coverage recorders of all workers, so
+`coverage::recorded_callbacks()` shows what the whole run covered, not what its own worker did.
+Several last scenarios run side by side.
+
 Rules for your `main`. A parallel run re-executes `main` in every worker, so `main` must build
 the same harnesses in the same order and do nothing before them that must not run twice;
 `Harness::new()` as the first statement is already the rule. A test with several harnesses in
@@ -324,6 +367,41 @@ Keep a suite serial when its numbers are compared against a baseline taken from 
 (finding counts do not change, wall times and console interleaving do), or when the machine is
 the limit: a GPU-heavy app is slowed by workers sharing one GPU, so cap them with
 `SLINT_HARNESS_JOBS_MAX`.
+
+## Screenshots
+
+With the `screenshots` feature (`slint-harness = { version = "=0.18.5", features =
+["screenshots"] }`) a harness can draw its windows with Slint's software renderer and save them as
+PNG, for example to keep the screenshots of a README or a website in step with the UI:
+
+```rust
+Harness::new()
+    .renderer(Renderer::Software)
+    .scenario("main window", |ctx| {
+        let app = ctx.launch(MainWindow::new)?;
+        screenshot::set_window_size(app.window(), (1920, 1152), 2.0); // HiDPI picture
+        pump(50);
+        let shot = screenshot::capture(app.window()).map_err(|e| Finding::simple("shot", e))?;
+        shot.save_png(std::path::Path::new("assets/main.png"))
+            .map_err(|e| Finding::simple("shot", e))?;
+        ctx.shutdown(app);
+        Ok(())
+    })
+    .run()
+```
+
+- `screenshot::capture(window)` draws the window and returns a `Shot` (physical pixels, RGBA8);
+  with the default `Renderer::Mock` it returns an error, because the mock renderer draws nothing.
+- `Shot::crop(x, y, w, h)` (physical pixels), `crop_logical` (logical window pixels) and
+  `crop_to(&element, margin)` cut a part out; `save_png(path)` writes it through a temporary file,
+  so a failed run never leaves half a picture. `Shot::blank`, `Shot::fill` and `Shot::paste` compose captures
+  (a dialog over its main window: headless windows are separate surfaces).
+- `screenshot::set_window_size(window, (w, h), scale)` sets the logical size and the scale
+  factor; the picture is `w * scale` x `h * scale` pixels.
+- The software renderer uses the system fonts, so pictures differ between machines; geometry
+  checks keep using the mock renderer. It draws only when `capture` asks, and there is no window
+  frame or title bar in the picture. Pump (or `wait_until` the app's own threads) before a
+  capture so layout, images and animations have settled.
 
 ## Coverage gate
 
@@ -411,6 +489,8 @@ Exit codes: 0 clean, 1 findings, 2 aborted (isolation could not be proven, no de
 - `coverage`: the opt-in coverage gate (above).
 - `jobs` / `max_jobs`: serial (default), a fixed number of worker processes or `Jobs::Auto`,
   and the cap; see Parallel runs.
+- `renderer`: `Renderer::Mock` (default, draws nothing) or, with the `screenshots` feature,
+  `Renderer::Software`; see Screenshots.
 - `sweep_options(SweepOptions { .. })`: the thresholds; the defaults are the Indicatrix ones.
   `floating_layers` (default `["PopupWindow"]`) lists the type names, or base names, of layers
   drawn above the content on purpose (a toast, a floating panel): a control inside a layer never
@@ -423,6 +503,8 @@ Exit codes: 0 clean, 1 findings, 2 aborted (isolation could not be proven, no de
   `window-invalid`. A custom `SmokeHost` may override `admits(&Control)` to restrict the pass to
   some controls (default: all).
 - `scenario`: one named journey.
+- `scenario_last`: a journey that runs after all `scenario`s (whatever the order of the calls),
+  in a parallel run with the union of every worker's coverage; see Parallel runs.
 - `teardown`: runs after the last scenario and the gate, before the profile is deleted: stop
   threads, flush files.
 - `run` / `run_to_report`: the latter returns the `Report` for a test that asserts counts.
@@ -438,7 +520,8 @@ The prelude (`use slint_harness::prelude::*`) brings `Harness`, `Ctx`, `Attached
 `WindowView`, `Control`, `ElementHandle`, `ElementRoot`, `AccessibleRole`, `Finding`, `Format`,
 `Report`, `Profile`, `ProfileDir`, `Smoke`, `SmokeStats`, `DenyRule`, `DenyField`, `DenyMatch`,
 `DEFAULT_DENY`, `SweepOptions`, `Coverage`, `GateRule`, `record_callback`, `arm_gate`,
-`Jobs`, `SLINT_VERSION`, `pump`, `settle`, `wait_until` and `std::process::ExitCode`. API details are
+`Jobs`, `Renderer`, `SLINT_VERSION`, `pump`, `settle`, `wait_until`, `wait_until_labeled`, the
+`timing` module and `std::process::ExitCode`. API details are
 on docs.rs; recipes (secondary windows, threads, sticky notices, deny lists from data, key
 chords, `report.json` in CI, a custom `SmokeHost`) are in `docs/cookbook.md`.
 

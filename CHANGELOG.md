@@ -1,5 +1,29 @@
 # Changelog
 
+## slint-harness 0.18.5
+
+- Timing statistics: the new `timing` module (`record`, `record_timeout`, `time`; in the prelude)
+  and `backend::wait_until_labeled`. The backend records `wait`, `settle` and `pump` by itself.
+  Each scenario prints a `timing:` console line (the six labels with the most time), `report.json`
+  gets `scenarios[i].timing` and a top-level `timing` (totals, parallel workers and utilisation),
+  and the report files get a "Timing" section (15 slowest scenarios, time and timeouts per label,
+  utilisation of a parallel run).
+- `Harness::scenario_last`: a scenario that runs after every ordinary one. In a parallel run the
+  coordinator dispatches it when all ordinary scenarios are done and hands it the union of the
+  workers' coverage recorders (every `done` message now carries the worker's recorder), so
+  `coverage::recorded_callbacks()` inside it sees the whole run.
+
+## slint-harness 0.18.4
+
+- Screenshots (opt-in feature `screenshots`): `Harness::renderer(Renderer::Software)` draws the
+  windows with Slint's software renderer; the new `screenshot` module captures a window
+  (`capture`), crops it (`Shot::crop`, `crop_logical`, `crop_to(&element, margin)`), saves it as
+  PNG through a temporary file (`Shot::save_png`), composes captures (`Shot::blank`,
+  `Shot::fill`, `Shot::paste`) and sets a window's logical size and scale
+  factor for HiDPI pictures (`set_window_size`). Parallel workers use the same renderer.
+- `backend::init_backend_with(Renderer)`; `init_backend()` is unchanged (mock renderer).
+- `Renderer` is in the prelude.
+
 ## slint-harness 0.18.3
 
 Ports the improvements the Indicatrix harness made after the crate was lifted from it.

@@ -578,6 +578,7 @@ dependencies = [
  "cfg_aliases",
  "i-slint-common",
  "i-slint-core",
+ "i-slint-renderer-software",
  "vtable",
 ]
 
@@ -1706,9 +1707,10 @@ dependencies = [
 
 [[package]]
 name = "slint-harness"
-version = "0.18.3"
+version = "0.18.5"
 dependencies = [
  "i-slint-backend-testing",
+ "png",
  "serde",
  "serde_json",
  "slint",

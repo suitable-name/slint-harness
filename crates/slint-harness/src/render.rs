@@ -95,6 +95,7 @@ pub(crate) fn html(report: &Report) -> String {
         }
         out.push_str("</table>\n");
     }
+    crate::timing_report::html(report, &mut out, escape);
     for (title, body) in &report.sections {
         let _ = writeln!(out, "<h2>{}</h2>", escape(title));
         let _ = writeln!(out, "<pre>{}</pre>", escape(body));
@@ -161,6 +162,7 @@ pub(crate) fn text(report: &Report) -> String {
         }
         out.push('\n');
     }
+    crate::timing_report::text(report, &mut out);
     for (title, body) in &report.sections {
         let _ = writeln!(out, "{title}");
         out.push_str(body);
