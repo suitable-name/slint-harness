@@ -1,0 +1,29 @@
+// The parallel-run self-test fixture (crates/uiprobe/tests/parallel.rs). The test compiles
+// the SAME text through `slint::slint!`; the two must match. The coverage inventory is exactly
+// the callback and the two buttons below; the buttons overlap on purpose (a deterministic
+// `overlap` finding in every sweep).
+import { Button } from "std-widgets.slint";
+
+export global Model {
+    callback ping();
+}
+
+export component Fixture inherits Window {
+    width: 300px;
+    height: 100px;
+    default-font-family: "FixedTestFont";
+    Button {
+        text: "Alpha";
+        x: 0px;
+        y: 10px;
+        width: 100px;
+        height: 30px;
+    }
+    Button {
+        text: "Beta";
+        x: 50px;
+        y: 10px;
+        width: 100px;
+        height: 30px;
+    }
+}

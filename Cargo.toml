@@ -1,9 +1,9 @@
 [workspace]
 resolver = "3"
-members = ["crates/slint-harness", "crates/slint-harness-hooks", "examples/counter", "examples/notes"]
-# slint-harness: a headless UI test harness for Slint apps on Slint's testing backend.
-# `crates/slint-harness` is the harness (a dev-dependency of the app under test);
-# `crates/slint-harness-hooks` is the std-only seam the app calls at its
+members = ["crates/uiprobe", "crates/uiprobe-hooks", "examples/counter", "examples/notes"]
+# uiprobe: a headless UI test harness for Slint apps on Slint's testing backend.
+# `crates/uiprobe` is the harness (a dev-dependency of the app under test);
+# `crates/uiprobe-hooks` is the std-only seam the app calls at its
 # `#[cfg(feature = "ui-harness")]` sites (file pickers, clipboard, opener, data dir);
 # `examples/counter` is the smallest app that uses both.
 # `examples/notes` is the full one: every hook, notices, deny rules, the coverage gate and all
@@ -13,14 +13,14 @@ members = ["crates/slint-harness", "crates/slint-harness-hooks", "examples/count
 edition = "2024"
 license = "MIT"
 rust-version = "1.92"
-repository = "https://github.com/suitable-name/slint-harness"
+repository = "https://github.com/suitable-name/uiprobe"
 
 [workspace.dependencies]
 # Pinned exactly: `i-slint-backend-testing` is an internal Slint crate without semver that pins
 # `i-slint-core = "=1.18.1"`. Cargo resolves one version of a 1.x crate per build, so an app on
 # another Slint patch fails to resolve rather than building two `i-slint-core`s; a `git`/`path`
 # Slint could still produce two, and the testing platform would then live in the wrong one.
-# One harness minor serves one Slint patch line (`slint-harness 0.18.x` = Slint 1.18.x).
+# One harness minor serves one Slint patch line (`uiprobe 0.18.x` = Slint 1.18.x).
 slint = { version = "=1.18.1", default-features = false }
 slint-build = "=1.18.1"
 i-slint-backend-testing = "=1.18.1"
@@ -30,8 +30,8 @@ toml = "1.1.6"
 png = "0.18.1"
 
 # Workspace members
-slint-harness = { path = "crates/slint-harness", version = "0.18.5" }
-slint-harness-hooks = { path = "crates/slint-harness-hooks", version = "0.1.0" }
+uiprobe = { path = "crates/uiprobe", version = "0.18.5" }
+uiprobe-hooks = { path = "crates/uiprobe-hooks", version = "0.1.0" }
 
 [workspace.lints.clippy]
 pedantic = { level = "warn", priority = -1 }

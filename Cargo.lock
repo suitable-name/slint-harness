@@ -226,8 +226,8 @@ version = "0.1.0"
 dependencies = [
  "slint",
  "slint-build",
- "slint-harness",
- "slint-harness-hooks",
+ "uiprobe",
+ "uiprobe-hooks",
 ]
 
 [[package]]
@@ -1159,8 +1159,8 @@ version = "0.1.0"
 dependencies = [
  "slint",
  "slint-build",
- "slint-harness",
- "slint-harness-hooks",
+ "uiprobe",
+ "uiprobe-hooks",
 ]
 
 [[package]]
@@ -1706,7 +1706,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "slint-harness"
+name = "uiprobe"
 version = "0.18.5"
 dependencies = [
  "i-slint-backend-testing",
@@ -1714,12 +1714,12 @@ dependencies = [
  "serde",
  "serde_json",
  "slint",
- "slint-harness-hooks",
+ "uiprobe-hooks",
  "toml",
 ]
 
 [[package]]
-name = "slint-harness-hooks"
+name = "uiprobe-hooks"
 version = "0.1.0"
 
 [[package]]

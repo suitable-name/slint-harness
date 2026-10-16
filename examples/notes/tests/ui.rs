@@ -13,12 +13,12 @@
 //! The coverage gate scans `ui/` and expects every global callback and interactive element to
 //! be covered or listed in `tests/coverage_allow.toml`; a scenario that drove a callback
 //! through the UI says so with `record_callback`. Reports: `report.md`, `report.html`,
-//! `report.txt` and `report.json` under `<target>/slint-harness/notes`. Run:
+//! `report.txt` and `report.json` under `<target>/uiprobe/notes`. Run:
 //! `cargo test -p notes --features ui-harness --test ui`.
 
 use notes::{HELP_URL, NotesWindow, build, settings_path};
 use slint::{ComponentHandle, Weak};
-use slint_harness::{coverage::record_callback, prelude::*};
+use uiprobe::{coverage::record_callback, prelude::*};
 use std::{cell::RefCell, fs, process::ExitCode, rc::Rc, time::Duration};
 
 /// The window the notice routines read: set by every launch, so a relaunch during the smoke

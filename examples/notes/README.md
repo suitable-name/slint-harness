@@ -1,11 +1,11 @@
 # notes
 
-A small Slint notes app that uses every `slint-harness` seam. Its test (`tests/ui.rs`) is the
+A small Slint notes app that uses every `uiprobe` seam. Its test (`tests/ui.rs`) is the
 reference for an app with file dialogs, a clipboard, an OS opener, an OS-resolved settings
 directory and an error notice.
 
 Run `cargo test -p notes --features ui-harness --test ui`, then open
-`target/slint-harness/notes/report.html` (`report.md`, `report.txt` and `report.json` are next
+`target/uiprobe/notes/report.html` (`report.md`, `report.txt` and `report.json` are next
 to it).
 
 What is where:

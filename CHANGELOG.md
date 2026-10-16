@@ -1,6 +1,6 @@
 # Changelog
 
-## slint-harness 0.18.5
+## uiprobe 0.18.5
 
 - Timing statistics: the new `timing` module (`record`, `record_timeout`, `time`; in the prelude)
   and `backend::wait_until_labeled`. The backend records `wait`, `settle` and `pump` by itself.
@@ -13,7 +13,7 @@
   workers' coverage recorders (every `done` message now carries the worker's recorder), so
   `coverage::recorded_callbacks()` inside it sees the whole run.
 
-## slint-harness 0.18.4
+## uiprobe 0.18.4
 
 - Screenshots (opt-in feature `screenshots`): `Harness::renderer(Renderer::Software)` draws the
   windows with Slint's software renderer; the new `screenshot` module captures a window
@@ -24,7 +24,7 @@
 - `backend::init_backend_with(Renderer)`; `init_backend()` is unchanged (mock renderer).
 - `Renderer` is in the prelude.
 
-## slint-harness 0.18.3
+## uiprobe 0.18.3
 
 Ports the improvements the Indicatrix harness made after the crate was lifted from it.
 
@@ -42,29 +42,29 @@ Ports the improvements the Indicatrix harness made after the crate was lifted fr
   `Coverage::label_props` / `reader_props` / `callback_hint`. Parallel workers carry the new
   credit.
 
-## slint-harness 0.18.2
+## uiprobe 0.18.2
 
 - Parallel runs (opt-in): `Harness::jobs(Jobs::Auto)` / `Jobs::Fixed(n)` and
-  `SLINT_HARNESS_JOBS=auto|<n>`, capped by `Harness::max_jobs` / `SLINT_HARNESS_JOBS_MAX`. The
+  `UIPROBE_JOBS=auto|<n>`, capped by `Harness::max_jobs` / `UIPROBE_JOBS_MAX`. The
   test binary starts copies of itself as worker processes, each with its own profile; `Auto`
   starts one worker and adds one every 5 s while at least 1.5 cores were idle. One merged
   report, console output in scenario order. The default stays the serial run.
 - New check `worker-crash`: a worker process died during a scenario (parallel runs only).
 
-## slint-harness 0.18.1
+## uiprobe 0.18.1
 
 - Fix: the default report directory is found from the test binary's path on both Cargo
   layouts (`target/<profile>/deps/` and the newer `target/<profile>/build/<package>/<hash>/out/`)
   before looking for `CACHEDIR.TAG`. 0.18.0 relied on the tag, which a target folder made by an
   older Cargo does not have, and then wrote the report to
-  `target/<profile>/build/<package>/slint-harness/<package>/` on nightly Cargo.
+  `target/<profile>/build/<package>/uiprobe/<package>/` on nightly Cargo.
 
-## slint-harness 0.18.0
+## uiprobe 0.18.0
 
 First release. Serves Slint 1.18.1 (exact pin). Lifted from the Indicatrix UI harness.
 
 - Report formats: `Harness::formats([Format::Markdown, Format::Html, Format::Text])` and
-  `SLINT_HARNESS_FORMATS=md,html,txt`. `report.json` is always written, `report.md` by
+  `UIPROBE_FORMATS=md,html,txt`. `report.json` is always written, `report.md` by
   default; a run removes the format files it did not select.
 - The smoke pass recognises modal backdrops with the run's `SweepOptions` (`modal_cover`),
   not the defaults.
@@ -74,7 +74,7 @@ First release. Serves Slint 1.18.1 (exact pin). Lifted from the Indicatrix UI ha
   back to the accessible placeholder text, so a `LineEdit` is found by its placeholder, and a
   `not-found` finding lists similar placeholders (`WindowView::placeholders`); the abort
   messages for missing debug info, a pre-set platform and a guarded path outside the profile
-  say what to do; `slint_harness::SLINT_VERSION` and the `harness` / `slint` fields of
+  say what to do; `uiprobe::SLINT_VERSION` and the `harness` / `slint` fields of
   `report.json`; the prelude adds `ElementRoot`, `Hooks`, `ProfileDir`, `DEFAULT_DENY`,
   `record_callback`, `arm_gate`, `SLINT_VERSION` and `std::process::ExitCode`.
 - The HTML report has a `main` landmark and real headings, column headers with scope, a
@@ -82,12 +82,12 @@ First release. Serves Slint 1.18.1 (exact pin). Lifted from the Indicatrix UI ha
 - Docs: the crate-level example is compile-checked; README quick start and troubleshooting;
   `docs/cookbook.md`; `examples/notes` shows every hook, the coverage gate, deny rules,
   notices and the report formats.
-- The default report directory is `<target>/slint-harness/<package>`, one folder per package,
+- The default report directory is `<target>/uiprobe/<package>`, one folder per package,
   so two harness tests in one workspace do not delete each other's report files; `<target>`
   follows Cargo's `CACHEDIR.TAG`, so the newer build-dir layout no longer puts reports under
   `target/<profile>/build/`.
 
-## slint-harness-hooks 0.1.0
+## uiprobe-hooks 0.1.0
 
 First release.
 

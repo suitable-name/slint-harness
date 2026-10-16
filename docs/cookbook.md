@@ -1,7 +1,7 @@
-# slint-harness cookbook
+# uiprobe cookbook
 
 Recipes for situations the README does not cover. Every snippet is a scenario body or a builder
-call against the API in `crates/slint-harness/src`; they are not compiled by the doc tests, so
+call against the API in `crates/uiprobe/src`; they are not compiled by the doc tests, so
 read them next to the rustdoc.
 
 ## Secondary windows and dialogs
@@ -114,7 +114,7 @@ smoke.deny = Vec::new(); // no built-in list: deny.txt is the whole list
 `ctx.press(&app, "Ctrl+S")` sends Slint `KeyPressed` and `KeyReleased` events to the window:
 modifiers first, then the key, released in reverse. The accepted names (`Escape`, `Return`,
 `Tab`, `Backspace`, `Delete`, the arrows, `F1`..`F12`, single characters) are in
-`crates/slint-harness/src/keys.rs`. The events reach the focused element only, so give the
+`crates/uiprobe/src/keys.rs`. The events reach the focused element only, so give the
 window a `forward-focus` target or call `focus()` on an element first; otherwise a handler on a
 `FocusScope` never fires. A chord that does not parse is a `bad-chord` finding.
 
@@ -136,14 +136,14 @@ window a `forward-focus` target or call `focus()` on an element first; otherwise
 `duration_ms`; `per_check` maps a check name to its count; `notes` and `sections` carry the
 text the smoke pass and the coverage gate add; `harness` and `slint` name the versions. The exit
 code is 0 clean, 1 findings, 2 aborted. While a baseline is being built, run with
-`SLINT_HARNESS_ALLOW_FAIL=1` (exit 0 with findings); `SLINT_HARNESS_FORMATS=txt` writes a plain
+`UIPROBE_ALLOW_FAIL=1` (exit 0 with findings); `UIPROBE_FORMATS=txt` writes a plain
 text file that is friendly to a CI log.
 
 ```text
-$ SLINT_HARNESS_FORMATS=txt cargo test --features ui-harness --test ui
-$ jq '.per_check' target/slint-harness/my-app/report.json
+$ UIPROBE_FORMATS=txt cargo test --features ui-harness --test ui
+$ jq '.per_check' target/uiprobe/my-app/report.json
 { "overlap": 2, "not-found": 1 }
-$ jq -r '.findings[] | "\(.check) \(.window): \(.detail) x\(.repeats)"' target/slint-harness/my-app/report.json
+$ jq -r '.findings[] | "\(.check) \(.window): \(.detail) x\(.repeats)"' target/uiprobe/my-app/report.json
 ```
 
 ## Baselines across machines
@@ -164,13 +164,13 @@ missing-label = 3   # known: icon buttons, tracked in the issue tracker
 ## A custom SmokeHost
 
 `ctx.smoke` fits a state that is "relaunch a window". When the state is something else (a wizard
-page, an open document) implement `slint_harness::smoke::SmokeHost` yourself. It has six
+page, an open document) implement `uiprobe::smoke::SmokeHost` yourself. It has six
 required methods (`restore`, `views`, `notice`, `clear_notice`, `main_alive`, `report`) and the
-optional `sweep_options`; `slint_harness::smoke::run(&mut host, &smoke)` runs the pass. Inside a
+optional `sweep_options`; `uiprobe::smoke::run(&mut host, &smoke)` runs the pass. Inside a
 scenario `host.report()` is `ctx.report()`.
 
 ```rust
-use slint_harness::smoke::SmokeHost;
+use uiprobe::smoke::SmokeHost;
 
 struct WizardHost<'a, 'b> {
     ctx: &'a mut Ctx<'b>,
@@ -205,7 +205,7 @@ impl SmokeHost for WizardHost<'_, '_> {
 
 // In a scenario:
 let mut host = WizardHost { ctx, app: None };
-let stats = slint_harness::smoke::run(&mut host, &Smoke::new("wizard page 2"));
+let stats = uiprobe::smoke::run(&mut host, &Smoke::new("wizard page 2"));
 ```
 
 ## Floating layers and scoped smoke passes
@@ -239,7 +239,7 @@ fn admits(&self, control: &Control) -> bool {
 
 ## Filtering scenarios while developing
 
-`SLINT_HARNESS_FILTER=open,save` runs the scenarios whose names contain `open` or `save`;
+`UIPROBE_FILTER=open,save` runs the scenarios whose names contain `open` or `save`;
 positional arguments that do not start with `-` filter the same way. Under a filter the coverage
 gate is skipped, because the scenarios that would reach the rest did not run; give the gate
 `GateRule::Always` to run it anyway. Beware `cargo test <name>`: cargo hands `<name>` to the
@@ -247,8 +247,8 @@ harness binary as a scenario filter, and when nothing matches the run does nothi
 no report (README, Troubleshooting).
 
 ```text
-$ SLINT_HARNESS_FILTER=open,save cargo test --features ui-harness --test ui
-slint-harness 0.18.5 (Slint 1.18.1): 2 of 7 scenario(s) selected, report dir target/slint-harness/my-app
+$ UIPROBE_FILTER=open,save cargo test --features ui-harness --test ui
+uiprobe 0.18.5 (Slint 1.18.1): 2 of 7 scenario(s) selected, report dir target/uiprobe/my-app
 ```
 
 ## Speed up a long suite
@@ -257,15 +257,15 @@ A suite with many scenarios and long waits finishes sooner when scenarios run in
 processes. No code change is needed to try it:
 
 ```text
-$ SLINT_HARNESS_JOBS=auto cargo test --features ui-harness --test ui
+$ UIPROBE_JOBS=auto cargo test --features ui-harness --test ui
 ```
 
 `auto` starts one worker and adds one every 5 seconds while cores are idle and scenarios are
-waiting; `SLINT_HARNESS_JOBS=4` starts four at once. For an app that is heavy on the GPU or on
+waiting; `UIPROBE_JOBS=4` starts four at once. For an app that is heavy on the GPU or on
 memory, cap the workers so they do not slow each other down:
 
 ```text
-$ SLINT_HARNESS_JOBS=auto SLINT_HARNESS_JOBS_MAX=2 cargo test --features ui-harness --test ui
+$ UIPROBE_JOBS=auto UIPROBE_JOBS_MAX=2 cargo test --features ui-harness --test ui
 ```
 
 To make it the suite's default, set it in code (the environment variables still override it):
@@ -288,8 +288,8 @@ line under its `-> N finding(s), M ms` line, and the report has a "Timing" secti
 `wait`, `settle` and `pump` come from the backend:
 
 ```text
-slint-harness:   -> 0 finding(s), 839000 ms
-slint-harness:   timing: wait 790.0 s (4120x, 38 timed out 380.0 s), settle 20.1 s (900x)
+uiprobe:   -> 0 finding(s), 839000 ms
+uiprobe:   timing: wait 790.0 s (4120x, 38 timed out 380.0 s), settle 20.1 s (900x)
 ```
 
 Many timed-out waits mean a condition that never becomes true (a handle that is never released, a
@@ -314,14 +314,14 @@ scenarios are done and, in a parallel run, receives every worker's coverage.
 
 The profile redirects `APPDATA` and the XDG variables, but on Windows the `dirs` crate asks the
 Known Folders API, which ignores them. Under the feature, ask the harness first with
-`slint_harness_hooks::paths::data_dir()` and fall back to the real lookup otherwise, in one
+`uiprobe_hooks::paths::data_dir()` and fall back to the real lookup otherwise, in one
 function that the app and the guard share. Then hand that function to the profile: a path that
 still resolves outside the profile aborts the run with exit code 2 before a window exists.
 
 ```rust
 pub fn settings_path() -> PathBuf {
     #[cfg(feature = "ui-harness")]
-    if let Some(dir) = slint_harness_hooks::paths::data_dir() {
+    if let Some(dir) = uiprobe_hooks::paths::data_dir() {
         return dir.join("settings.txt");
     }
     dirs::config_dir().unwrap_or_default().join("my-app").join("settings.txt")

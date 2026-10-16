@@ -1,11 +1,11 @@
 //! The counter under the harness: a geometry sweep at two sizes, a click journey with an
 //! expectation, and a click-everything pass. The report goes to the default
-//! `<target>/slint-harness/counter`. Run:
+//! `<target>/uiprobe/counter`. Run:
 //! `cargo test -p counter --features ui-harness --test ui` (the `ui` target requires the
 //! feature, as the README recipe does).
 
 use counter::Counter;
-use slint_harness::prelude::*;
+use uiprobe::prelude::*;
 use std::process::ExitCode;
 
 fn main() -> ExitCode {

@@ -1,6 +1,6 @@
-//! A small notes app driven by `slint-harness`: one window with a title field, the buttons a
+//! A small notes app driven by `uiprobe`: one window with a title field, the buttons a
 //! real app has (open, save as, copy, help, clear, delete, quit), an Autosave switch that
-//! writes a settings file, and an error notice. Every seam of `slint-harness-hooks` is used
+//! writes a settings file, and an error notice. Every seam of `uiprobe-hooks` is used
 //! under the `ui-harness` feature: file dialogs are answered from the harness's queue,
 //! clipboard writes and opened URLs are captured, and the settings file lives in the
 //! harness's data directory. With the feature off the same functions reach the OS instead;
@@ -156,7 +156,7 @@ fn show_notice(window: &NotesWindow, kind: &str, text: &str) {
 #[must_use]
 pub fn settings_path() -> PathBuf {
     #[cfg(feature = "ui-harness")]
-    if let Some(dir) = slint_harness_hooks::paths::data_dir() {
+    if let Some(dir) = uiprobe_hooks::paths::data_dir() {
         return dir.join(SETTINGS_FILE);
     }
     config_dir().join(SETTINGS_FILE)
@@ -194,7 +194,7 @@ fn save_autosave(on: bool) -> std::io::Result<()> {
 fn pick_note_to_open() -> Option<PathBuf> {
     #[cfg(feature = "ui-harness")]
     {
-        slint_harness_hooks::picker::next("Open Note")
+        uiprobe_hooks::picker::next("Open Note")
     }
     #[cfg(not(feature = "ui-harness"))]
     {
@@ -206,7 +206,7 @@ fn pick_note_to_open() -> Option<PathBuf> {
 fn pick_save_path() -> Option<PathBuf> {
     #[cfg(feature = "ui-harness")]
     {
-        slint_harness_hooks::picker::next("Save Note As")
+        uiprobe_hooks::picker::next("Save Note As")
     }
     #[cfg(not(feature = "ui-harness"))]
     {
@@ -226,7 +226,7 @@ fn native_dialog(title: &str) -> Option<PathBuf> {
 /// stand-in here).
 fn copy_to_clipboard(text: &str) {
     #[cfg(feature = "ui-harness")]
-    if slint_harness_hooks::clipboard::capture(text) {
+    if uiprobe_hooks::clipboard::capture(text) {
         return;
     }
     eprintln!("notes: would copy {text:?} to the system clipboard (no clipboard crate here)");
@@ -235,7 +235,7 @@ fn copy_to_clipboard(text: &str) {
 /// The OS opener. Feature on: captured by the harness; off: the browser (a stand-in here).
 fn open_in_browser(url: &str) {
     #[cfg(feature = "ui-harness")]
-    if slint_harness_hooks::opener::capture(url) {
+    if uiprobe_hooks::opener::capture(url) {
         return;
     }
     eprintln!("notes: would open {url} in the browser (no opener crate here)");

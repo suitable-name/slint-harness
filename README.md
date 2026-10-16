@@ -1,4 +1,4 @@
-# slint-harness
+# uiprobe
 
 A headless UI harness for [Slint](https://slint.dev) apps. It drives your real app, with all its
 Rust wiring, on Slint's testing backend inside a throw-away profile, and collects every problem
@@ -25,7 +25,7 @@ Versions and the Slint pin, License.
 Five steps; each says what goes wrong when it is skipped. `examples/counter` is this recipe in
 the smallest app; `examples/notes` is the full one (see Examples).
 
-1. **Cargo.toml.** The harness is a dev-dependency. The small `slint-harness-hooks` crate
+1. **Cargo.toml.** The harness is a dev-dependency. The small `uiprobe-hooks` crate
    (std only, no Slint) is an optional normal dependency behind a `ui-harness` feature,
    because code under `src/` can never name a dev-dependency. The test target needs
    `harness = false` (the harness owns `main`: panic recorder, exit code, argument filter)
@@ -33,17 +33,17 @@ the smallest app; `examples/notes` is the full one (see Examples).
 
    ```toml
    [features]
-   ui-harness = ["dep:slint-harness-hooks"]
+   ui-harness = ["dep:uiprobe-hooks"]
 
    [dependencies]
    slint = "=1.18.1"
-   slint-harness-hooks = { version = "0.1", optional = true }
+   uiprobe-hooks = { version = "0.1", optional = true }
 
    [build-dependencies]
    slint-build = "=1.18.1"
 
    [dev-dependencies]
-   slint-harness = "=0.18.5"
+   uiprobe = "=0.18.5"
 
    [[test]]
    name = "ui"
@@ -78,7 +78,7 @@ the smallest app; `examples/notes` is the full one (see Examples).
 
    ```rust
    use my_app::MainWindow;
-   use slint_harness::prelude::*;
+   use uiprobe::prelude::*;
 
    fn main() -> ExitCode {
        Harness::new()
@@ -113,7 +113,7 @@ the smallest app; `examples/notes` is the full one (see Examples).
    ```
 
    The first console line names the harness and Slint versions, the selected scenarios and the
-   report directory (`<target>/slint-harness/<package>`); a failing run ends with its
+   report directory (`<target>/uiprobe/<package>`); a failing run ends with its
    findings.
 
 5. **Hooks**, as soon as the app has a file dialog, a clipboard, an opener or an OS-resolved
@@ -130,7 +130,7 @@ the smallest app; `examples/notes` is the full one (see Examples).
   guarded, an error notice read and cleared by the harness, a scenario deny word and an
   expected notice in the smoke pass, `record_callback`, the coverage gate with a TOML allow
   file, and all three report formats. `cargo test -p notes --features ui-harness --test ui`,
-  then open `target/slint-harness/notes/report.html`.
+  then open `target/uiprobe/notes/report.html`.
 
 ## Hooks: file dialogs, clipboard, opener, data directory
 
@@ -144,7 +144,7 @@ which opens a native file dialog opens a real one and blocks the run.
 fn pick_file(title: &str) -> Option<std::path::PathBuf> {
     #[cfg(feature = "ui-harness")]
     {
-        slint_harness_hooks::picker::next(title)
+        uiprobe_hooks::picker::next(title)
     }
     #[cfg(not(feature = "ui-harness"))]
     {
@@ -155,7 +155,7 @@ fn pick_file(title: &str) -> Option<std::path::PathBuf> {
 // Clipboard and opener: return early when the harness captured the call.
 fn copy_text(text: &str) {
     #[cfg(feature = "ui-harness")]
-    if slint_harness_hooks::clipboard::capture(text) {
+    if uiprobe_hooks::clipboard::capture(text) {
         return;
     }
     // ... the real clipboard write
@@ -163,7 +163,7 @@ fn copy_text(text: &str) {
 
 fn open_url(url: &str) {
     #[cfg(feature = "ui-harness")]
-    if slint_harness_hooks::opener::capture(url) {
+    if uiprobe_hooks::opener::capture(url) {
         return;
     }
     // ... start the OS opener
@@ -173,7 +173,7 @@ fn open_url(url: &str) {
 // Known Folders and ignores APPDATA) ask the harness first:
 fn data_dir() -> std::path::PathBuf {
     #[cfg(feature = "ui-harness")]
-    if let Some(dir) = slint_harness_hooks::paths::data_dir() {
+    if let Some(dir) = uiprobe_hooks::paths::data_dir() {
         return dir;
     }
     // ... the normal lookup
@@ -191,12 +191,12 @@ there are stubs because the example ships no dialog crate.
 
 ## Isolation
 
-`Profile::isolated()` creates `<temp>/slint-harness-<pid>-<nanos>`, points `APPDATA`,
+`Profile::isolated()` creates `<temp>/uiprobe-<pid>-<nanos>`, points `APPDATA`,
 `LOCALAPPDATA`, `XDG_CONFIG_HOME`, `XDG_CACHE_HOME`, `XDG_DATA_HOME`, `XDG_STATE_HOME`,
 `XDG_RUNTIME_DIR`, `HOME`, `USERPROFILE`, `TEMP`, `TMP` and `TMPDIR` into it, sets
-`slint_harness_hooks::paths::set_data_dir` and moves the working directory into it. Windows Known
+`uiprobe_hooks::paths::set_data_dir` and moves the working directory into it. Windows Known
 Folders are not reachable through the environment: an app that uses them asks
-`slint_harness_hooks::paths::data_dir` (above). Environment redirection alone does not prove your
+`uiprobe_hooks::paths::data_dir` (above). Environment redirection alone does not prove your
 app obeys it, so hand over the paths the app really resolves:
 
 ```rust
@@ -212,7 +212,7 @@ Exit code 2 ends the run early: a guarded path outside the profile, a Slint plat
 installed itself (the app must not select a backend when driven by the harness), or a UI without
 debug info. In every case the profile is deleted and the environment restored first, and the
 message says what to change. A scenario can request the same through
-`slint_harness::profile::request_abort`. No report file is written for an aborted run: the cause
+`uiprobe::profile::request_abort`. No report file is written for an aborted run: the cause
 is on stderr, the findings made so far on stdout only.
 
 ## Checks
@@ -237,7 +237,7 @@ is on stderr, the findings made so far on stdout only.
 | `ambiguous-label` | `WindowView::find` matched several elements |
 | `coverage` | an uncovered UI action, or a stale allow-list entry |
 | `worker-crash` | a parallel-run worker process died during this scenario |
-| `config` | a bad environment variable, an unmatched SLINT_HARNESS_FILTER, a harness without scenarios, or a report file that could not be written or removed |
+| `config` | a bad environment variable, an unmatched UIPROBE_FILTER, a harness without scenarios, or a report file that could not be written or removed |
 
 Identical findings are merged with a repeat count. The report lists every scenario with its
 finding count and wall time.
@@ -255,20 +255,20 @@ scenarios with timings, notes, sections, per-check totals). Beside it, one file 
 | `Format::Text` (`raw`) | `report.txt` | terminals and CI logs; the Markdown without markup (section bodies, which the coverage gate writes as Markdown, are copied as they are) |
 
 `Harness::formats([Format::Markdown, Format::Html])` selects them in code;
-`SLINT_HARNESS_FORMATS=md,html,txt` replaces that list (`json` is accepted and ignored because
+`UIPROBE_FORMATS=md,html,txt` replaces that list (`json` is accepted and ignored because
 it is always written; an empty value means JSON only). A run removes the `report.md`,
 `report.html` and `report.txt` it did not select, so the directory always shows what the last
 run wrote. The finding texts are the same in every format.
 
 ## Console output
 
-Every line starts with `slint-harness`. In order: the banner (`slint-harness 0.18.5 (Slint
+Every line starts with `uiprobe`. In order: the banner (`uiprobe 0.18.5 (Slint
 1.18.1): 7 of 7 scenario(s) selected, report dir ...`), the profile directory and the guarded
 paths, one `scenario <name>` line per scenario with its `-> N finding(s), M ms` and a `timing:`
 line (see Timing), the smoke counters, the coverage counters, the report files written, then `PASS, no findings` or `FAIL,
 N finding(s):` with the per-check counts and up to 25 findings as `[window] check: element --
 detail (xN) [state]` (the rest: `... N more in <dir>`). Aborts go to stderr as
-`slint-harness: ABORT: <cause and what to change>`. No color, no cursor movement: the output
+`uiprobe: ABORT: <cause and what to change>`. No color, no cursor movement: the output
 reads the same in a CI log and in a screen reader.
 
 ### Timing
@@ -278,8 +278,8 @@ scenario's `-> N finding(s), M ms` line the console prints the labels that took 
 time:
 
 ```text
-slint-harness:   -> 0 finding(s), 51234 ms
-slint-harness:   timing: relaunch 31.2 s (45x), wait 12.0 s (210x, 3 timed out 9.0 s), settle 4.1 s (80x)
+uiprobe:   -> 0 finding(s), 51234 ms
+uiprobe:   timing: relaunch 31.2 s (45x), wait 12.0 s (210x, 3 timed out 9.0 s), settle 4.1 s (80x)
 ```
 
 Each label is `<name> <total> (<samples>x[, <n> timed out <time>])`, sorted by total, at most six.
@@ -289,7 +289,7 @@ real time a direct `pump` call spent draining events; the pumps inside a wait be
 wait). Your own code adds more:
 
 ```rust
-use slint_harness::prelude::*;
+use uiprobe::prelude::*;
 
 timing::record("db-open", elapsed);                  // one sample
 timing::record_timeout("relaunch", elapsed);         // a sample that hit its timeout
@@ -321,8 +321,8 @@ Harness::new()
     // ... scenarios ...
 ```
 
-`SLINT_HARNESS_JOBS=serial|1|auto|<n>` replaces `jobs` and `SLINT_HARNESS_JOBS_MAX=<n>` (at
-least 1) replaces `max_jobs`, so `SLINT_HARNESS_JOBS=auto cargo test --test ui` needs no code
+`UIPROBE_JOBS=serial|1|auto|<n>` replaces `jobs` and `UIPROBE_JOBS_MAX=<n>` (at
+least 1) replaces `max_jobs`, so `UIPROBE_JOBS=auto cargo test --test ui` needs no code
 change; an invalid value is a `config` finding and the configured value is kept.
 
 How it works. Threads are not an option (Slint's platform, the profile's environment redirect
@@ -336,7 +336,7 @@ runs serial.
 
 What stays the same. The console shows each scenario's output in scenario order, not in
 completion order; output outside scenarios (worker setup and teardown) is printed as it arrives,
-prefixed `slint-harness: worker <k>: `. The result is one report: findings, repeat counts,
+prefixed `uiprobe: worker <k>: `. The result is one report: findings, repeat counts,
 per-check totals and the scenario list are identical to a serial run of the same suite, with one
 extra note, `parallel run: <n> worker(s) used, peak <p> at once`. The coverage gate sees the
 union of what all workers reached.
@@ -366,11 +366,11 @@ the run ends with exit code 2.
 Keep a suite serial when its numbers are compared against a baseline taken from a serial run
 (finding counts do not change, wall times and console interleaving do), or when the machine is
 the limit: a GPU-heavy app is slowed by workers sharing one GPU, so cap them with
-`SLINT_HARNESS_JOBS_MAX`.
+`UIPROBE_JOBS_MAX`.
 
 ## Screenshots
 
-With the `screenshots` feature (`slint-harness = { version = "=0.18.5", features =
+With the `screenshots` feature (`uiprobe = { version = "=0.18.5", features =
 ["screenshots"] }`) a harness can draw its windows with Slint's software renderer and save them as
 PNG, for example to keep the screenshots of a README or a website in step with the UI:
 
@@ -410,7 +410,7 @@ scans every `.slint` under `ui/` (relative to the test crate's `CARGO_MANIFEST_D
 global callbacks and interactive element sites, and at the end of the run turns every one the
 scenarios never reached into a `coverage` finding. A click through `WindowView::click` or the
 smoke pass counts as activated; a `find*` counts as touched; a scenario that invokes a global
-callback directly says so with `slint_harness::coverage::record_callback("Model.name")`.
+callback directly says so with `uiprobe::coverage::record_callback("Model.name")`.
 
 Keys: `Model.name` for a callback; `file.slint|Component|id`, `file.slint|Component|"label"`
 or `file.slint|Component|<Type@line>` for an element (the report's Coverage section prints
@@ -431,7 +431,7 @@ reason = "covered elsewhere"
 
 An entry that matches nothing is a `coverage` finding too (stale). `GateRule` says when the
 gate runs: `NoFilter` (default: skipped under a scenario filter), `Always`, or `Armed` (only
-when a scenario called `slint_harness::coverage::arm_gate()`), set with `.gate_when(..)`.
+when a scenario called `uiprobe::coverage::arm_gate()`), set with `.gate_when(..)`.
 
 ### How an element is matched, and what to configure
 
@@ -452,12 +452,12 @@ a one-line element with several literals gives each property its own.
   Naming a property here also reads it as a label. Both default to empty.
 - `Coverage::callback_hint("add a row to the callback table")`: the advice at the end of a
   callback-gap finding (`callback never invoked (file:line); <hint>`).
-- `slint_harness::coverage::record_wrappers(&view.root, &pressed, touched)`: a wrapper component
+- `uiprobe::coverage::record_wrappers(&view.root, &pressed, touched)`: a wrapper component
   carries the site id on its own root while the element a scenario presses is the widget inside
   it; this records the ids of every element at the pressed element's rectangle (0.6 px
   tolerance). The smoke pass calls it for every activation; call it yourself when a scenario
   presses a wrapper by hand.
-- `slint_harness::coverage::record_site_id("Component::site-id")`: credits a site directly, for a
+- `uiprobe::coverage::record_site_id("Component::site-id")`: credits a site directly, for a
   press whose element reports another id.
 
 A parallel run carries all of these recorder sets from the workers to the coordinator.
@@ -466,20 +466,20 @@ A parallel run carries all of these recorder sets from the workers to the coordi
 
 | Variable | Effect |
 |---|---|
-| `SLINT_HARNESS_FILTER` | comma-separated scenario name substrings to run (positional arguments that do not start with `-` filter too); positional arguments that match no scenario run nothing and write no report (that is cargo handing another target's filter to this one), an unmatched `SLINT_HARNESS_FILTER` is a `config` finding |
-| `SLINT_HARNESS_SIZES` | `1366x768,720x480`; replaces `Harness::sizes` |
-| `SLINT_HARNESS_FORMATS` | `md,html,txt`: the report files besides `report.json`, which is always written; replaces `Harness::formats`; `json` is accepted and ignored, empty means JSON only, an unknown name is a `config` finding |
-| `SLINT_HARNESS_JOBS` | `serial`, `1`, `auto` or a worker count: how many worker processes run the scenarios (Parallel runs); replaces `Harness::jobs`; default serial, an invalid value is a `config` finding |
-| `SLINT_HARNESS_JOBS_MAX` | worker cap for `auto` and a fixed count, at least 1; replaces `Harness::max_jobs`; default the number of cores, an invalid value is a `config` finding |
-| `SLINT_HARNESS_SEED` | `u64` for scenarios that randomise (`ctx.seed()`), default 0 |
-| `SLINT_HARNESS_ALLOW_FAIL` | any value: exit code 0 even with findings |
+| `UIPROBE_FILTER` | comma-separated scenario name substrings to run (positional arguments that do not start with `-` filter too); positional arguments that match no scenario run nothing and write no report (that is cargo handing another target's filter to this one), an unmatched `UIPROBE_FILTER` is a `config` finding |
+| `UIPROBE_SIZES` | `1366x768,720x480`; replaces `Harness::sizes` |
+| `UIPROBE_FORMATS` | `md,html,txt`: the report files besides `report.json`, which is always written; replaces `Harness::formats`; `json` is accepted and ignored, empty means JSON only, an unknown name is a `config` finding |
+| `UIPROBE_JOBS` | `serial`, `1`, `auto` or a worker count: how many worker processes run the scenarios (Parallel runs); replaces `Harness::jobs`; default serial, an invalid value is a `config` finding |
+| `UIPROBE_JOBS_MAX` | worker cap for `auto` and a fixed count, at least 1; replaces `Harness::max_jobs`; default the number of cores, an invalid value is a `config` finding |
+| `UIPROBE_SEED` | `u64` for scenarios that randomise (`ctx.seed()`), default 0 |
+| `UIPROBE_ALLOW_FAIL` | any value: exit code 0 even with findings |
 | `SLINT_EMIT_DEBUG_INFO` | `1` at compile time: Slint debug info |
 
 Exit codes: 0 clean, 1 findings, 2 aborted (isolation could not be proven, no debug info).
 
 ## Builder reference
 
-- `report_dir`: default `<target>/slint-harness/<package>` (`<target>` from
+- `report_dir`: default `<target>/uiprobe/<package>` (`<target>` from
   `CARGO_TARGET_TMPDIR` under `cargo test`; one folder per package, so two harness tests in
   one workspace keep their own files).
 - `sizes`: the window sizes `ctx.sweep_at_sizes` uses.
@@ -513,10 +513,10 @@ Exit codes: 0 clean, 1 findings, 2 aborted (isolation could not be proven, no de
 matches the accessible label or, when no label matches, the accessible placeholder text (a
 `LineEdit` carries only a placeholder); `find_id("Component::id")` does not depend on text;
 `find_role`, `find_nth`, `labels()` and `placeholders()` complete the set, and a miss is a
-`not-found` finding that lists similar labels and placeholders. `slint_harness::target_dir!()`
+`not-found` finding that lists similar labels and placeholders. `uiprobe::target_dir!()`
 works in any target; integration tests get the compile-time path, others the run-time one.
 
-The prelude (`use slint_harness::prelude::*`) brings `Harness`, `Ctx`, `Attached`, `Hooks`,
+The prelude (`use uiprobe::prelude::*`) brings `Harness`, `Ctx`, `Attached`, `Hooks`,
 `WindowView`, `Control`, `ElementHandle`, `ElementRoot`, `AccessibleRole`, `Finding`, `Format`,
 `Report`, `Profile`, `ProfileDir`, `Smoke`, `SmokeStats`, `DenyRule`, `DenyField`, `DenyMatch`,
 `DEFAULT_DENY`, `SweepOptions`, `Coverage`, `GateRule`, `record_callback`, `arm_gate`,
@@ -544,12 +544,12 @@ Symptom, cause, fix. Aborts (exit code 2) print the same advice on stderr.
   binary's `main`; the window constructor the scenarios launch must not choose one.
 - **`ABORT: the guarded path ... is outside the profile`.** The app resolves that path through
   something the profile cannot redirect (Windows Known Folders via the `dirs` crate, a
-  hard-coded path). Under the feature ask `slint_harness_hooks::paths::data_dir()` first
+  hard-coded path). Under the feature ask `uiprobe_hooks::paths::data_dir()` first
   (Hooks); a read-only path that may live outside does not belong in `guard_paths`.
 - **`no scenario matches the argument filter ...; nothing run, report not written`.** You ran
   `cargo test <name>` and cargo handed `<name>` to the harness binary as a scenario filter.
-  Run `cargo test --test ui` (no filter), or filter on purpose with `SLINT_HARNESS_FILTER`.
-- **`config: SLINT_HARNESS_FILTER=... matches no scenario`.** A typo in the filter; the
+  Run `cargo test --test ui` (no filter), or filter on purpose with `UIPROBE_FILTER`.
+- **`config: UIPROBE_FILTER=... matches no scenario`.** A typo in the filter; the
   finding lists the scenario names.
 - **`config: no scenarios`.** The harness has no `.scenario(..)`.
 - **`not-found: no element with label "Save"; similar labels: [...]`.** The label changed, the
@@ -562,7 +562,7 @@ Symptom, cause, fix. Aborts (exit code 2) print the same advice on stderr.
   `ctx.on_error_notice(..)` (both per scenario), and list the notices a state is expected to
   raise in `Smoke::allowed_notices`.
 - **The run hangs at a click.** That control opened a native dialog and the app does not go
-  through the hooks: add `slint_harness_hooks::picker::next` at the dialog site (Hooks). Until
+  through the hooks: add `uiprobe_hooks::picker::next` at the dialog site (Hooks). Until
   then, deny the control: `Smoke::new(..).deny(["import"])`.
 - **The run ends at the first panic with no report.** `panic = "abort"` in the test profile
   disables catching. Use the default `unwind` for the profile that runs the UI test.
@@ -580,7 +580,7 @@ Symptom, cause, fix. Aborts (exit code 2) print the same advice on stderr.
   exact Slint pin (Versions and the Slint pin): pin `slint = "=1.18.1"` in your app, or use the
   harness release for your Slint line.
 - **The report landed somewhere unexpected.** Run through `cargo test` (it sets
-  `CARGO_TARGET_TMPDIR` and `CARGO_PKG_NAME`, from which `<target>/slint-harness/<package>`
+  `CARGO_TARGET_TMPDIR` and `CARGO_PKG_NAME`, from which `<target>/uiprobe/<package>`
   is derived) or set `Harness::report_dir` explicitly; the first console line always prints
   the directory.
 
@@ -610,21 +610,21 @@ Symptom, cause, fix. Aborts (exit code 2) print the same advice on stderr.
 
 ## Versions and the Slint pin
 
-`slint-harness 0.18.x` serves Slint 1.18.x exactly: the harness pins `slint` and
+`uiprobe 0.18.x` serves Slint 1.18.x exactly: the harness pins `slint` and
 `i-slint-backend-testing` with `=1.18.1`, because the testing backend is an internal Slint
-crate without semver that pins `i-slint-core` exactly. `slint_harness::SLINT_VERSION` holds the
+crate without semver that pins `i-slint-core` exactly. `uiprobe::SLINT_VERSION` holds the
 version, the first console line prints it, and `report.json` carries it (`harness`, `slint`).
 
 What that means for your app: its `slint` must resolve to the same 1.18.1. Cargo allows one
 version of a 1.x crate per build, so a requirement that cannot be 1.18.1 does not build two
-copies, it fails to resolve (`failed to select a version for slint`, or for `slint-harness`).
+copies, it fails to resolve (`failed to select a version for slint`, or for `uiprobe`).
 Two ways out: pin `slint = "=1.18.1"` in your app, or move to the harness release that serves
 your Slint line (one harness minor per Slint patch line). `cargo tree -i i-slint-core -e
 normal,dev` shows who pulls which version. A `git` or `path` Slint can still put two
 `i-slint-core`s into one build; the testing platform then lives in the wrong one and the first
 launch fails or aborts; `cargo tree -d` shows the duplicate.
 
-`slint-harness-hooks` has its own `0.1.x` line and no Slint dependency. Minimum Rust: 1.92
+`uiprobe-hooks` has its own `0.1.x` line and no Slint dependency. Minimum Rust: 1.92
 (Slint's).
 
 ## License
